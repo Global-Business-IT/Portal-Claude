@@ -1,0 +1,13 @@
+{
+  "name": "portal-claude",
+  "private": true,
+  "scripts": {
+    "install:all": "npm --prefix server install && npm --prefix web install",
+    "build": "npm --prefix web run build",
+    "start": "npm --prefix server start",
+    "dev:server": "npm --prefix server run dev",
+    "dev:web": "npm --prefix web run dev",
+    "test": "npm --prefix server test",
+    "create-token": "npm --prefix server run create-token --"
+  }
+}

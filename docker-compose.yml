@@ -1,0 +1,17 @@
+services:
+  portal:
+    build: .
+    env_file: server/.env
+    environment:
+      DB_PATH: /app/server/data/portal.db
+      SKILLS_DIR: /app/server/data/skills-repo
+      WORK_DIR: /app/server/data/work
+      OUTPUTS_DIR: /app/server/data/outputs
+    ports: ["3000:3000"]
+    volumes: ["portal-data:/app/server/data"]
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 2g
+    pids_limit: 512
+volumes:
+  portal-data:
