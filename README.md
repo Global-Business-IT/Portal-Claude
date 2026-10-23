@@ -80,6 +80,27 @@ Instalación local: `pip install "markitdown[pdf,docx,pptx,xlsx,xls]"` (Python 3
 Para scripts con sandbox en Docker puede hacer falta permitir user namespaces en el host; si no está disponible,
 la ejecución falla de forma segura en lugar de correr sin aislamiento.
 
+## Despliegue en contenedor (producción)
+
+La imagen (`Dockerfile`) incluye el frontend ya compilado (lo sirve el mismo servidor en `/`), git, MarkItDown,
+bubblewrap/socat para el sandbox y un Python con `python-docx`, `openpyxl`, `pillow`, `requests` y `lxml`
+para los scripts de las skills. Sirve igual en un servidor de la empresa (`docker compose`) o en Railway, Render,
+Fly.io o Azure Container Apps (desde el `Dockerfile`).
+
+1. **Volumen persistente** montado en `/app/server/data` (base SQLite, copia de las skills, resultados).
+   Una sola instancia mientras la base sea SQLite.
+2. **Variables de entorno** (en el panel de la plataforma o en `server/.env`; ver `server/.env.example`):
+   `ANTHROPIC_API_KEY`, `SKILLS_REPO_URL`, `SKILLS_REPO_TOKEN`, `GITHUB_WEBHOOK_SECRET`, `TRUST_PROXY=1`
+   y, para `gbit-doc-iso9001`, `SKILL_SANDBOX_DOMAINS=kaffqbjzgkoxzkrocovp.supabase.co`.
+   Las rutas de datos (`DB_PATH`, `SKILLS_DIR`, `WORK_DIR`, `OUTPUTS_DIR`) ya vienen fijadas en la imagen.
+3. **Comprobar el entorno** desde la consola del contenedor: `npm run check-deploy`
+   (variables, volumen, git, Python, MarkItDown y si bubblewrap puede aislar). Si indica que falta `/proc`,
+   pon `SKILL_SANDBOX_WEAKER_NESTED=1`; si bubblewrap no puede crear namespaces, mira las opciones
+   comentadas en `docker-compose.yml` (en plataformas gestionadas que no las permiten, los scripts quedan bloqueados).
+4. **Primer admin:** `npm run create-token -- --name "Nombre" --role admin` en la consola del contenedor.
+5. **HTTPS y webhook:** dominio con HTTPS; en GitHub, webhook a `https://<dominio>/webhooks/github`.
+6. **Skills con scripts:** en *Administración → Skills*, modo **Aislados (sandbox)**.
+
 ## Agregar una tarea
 
 Edita `server/src/tasks.js` y añade un objeto a `TASKS` (campos + `build`). El formulario del
@@ -103,6 +124,7 @@ En Administración → Skills, cada skill con scripts tiene tres modos:
 - **Restringidos (sin aislamiento)**: para servidores Windows sin sandbox. Solo se permite
   `python|node <script de la propia skill> [argumentos]`; sin `;`, `&&`, `|`, redirecciones,
   variables ni `python -c`; las rutas de los argumentos deben estar dentro de la carpeta de la ejecución.
+  También se permiten scripts Python que Claude escriba en `tmp/` (p. ej. los que importan una librería de la skill), tras una revisión estática: solo módulos de una lista (`SKILL_SCRIPT_MODULES`), sin `subprocess`, `os.system`, borrados, `eval/exec`, y solo URLs a hosts de `SKILL_SCRIPT_HOSTS` (por defecto el Supabase de GBIT). Es una barrera de mejor esfuerzo.
   Aun así, los scripts corren con los permisos del usuario del servidor: revísalos en el repositorio.
 
 Requisitos en Windows: Git for Windows (Git Bash, que usa el SDK para Bash), Python en el PATH y las

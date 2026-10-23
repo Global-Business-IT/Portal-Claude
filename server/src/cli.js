@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { createToken } from "./db.js";
+import { createToken, closeDb } from "./db.js";
 
 // Uso: npm run create-token -- --name "Ana Pérez" [--role admin] [--limit 50] [--days 90]
 const args = Object.fromEntries(
@@ -18,7 +18,7 @@ if (args.role && !["user", "admin"].includes(args.role)) {
   process.exit(1);
 }
 
-const { id, token } = createToken({
+const { id, token } = await createToken({
   name: args.name,
   role: args.role || "user",
   dailyLimit: Number(args.limit) || 50,
@@ -28,3 +28,4 @@ const { id, token } = createToken({
 console.log(`\nToken #${id} creado para "${args.name}" (${args.role || "user"}).`);
 console.log("Cópialo ahora; no se vuelve a mostrar:\n");
 console.log("  " + token + "\n");
+await closeDb();

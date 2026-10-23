@@ -3,6 +3,9 @@ node_modules
 server/data
 web/dist
 .env
+**/.env
 server/.env
 skills-empresa
 .git
+CLAUDE.md
+**/*.db

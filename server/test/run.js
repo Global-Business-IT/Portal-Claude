@@ -49,8 +49,8 @@ async function run(cookie, task, fields = {}, file) {
   return { status: res.status, body: await res.json() };
 }
 
-const user = dbm.createToken({ name: "Ana Prueba", dailyLimit: 5 });
-const admin = dbm.createToken({ name: "Admin", role: "admin" });
+const user = await dbm.createToken({ name: "Ana Prueba", dailyLimit: 5 });
+const admin = await dbm.createToken({ name: "Admin", role: "admin" });
 
 test("1-2. login: token inválido, válido, revocado y expirado", async () => {
   let r = await login("gbl_nope");
@@ -61,12 +61,12 @@ test("1-2. login: token inválido, válido, revocado y expirado", async () => {
   r = await login(user.token);
   assert.equal(r.res.status, 200); assert.equal(r.body.user.name, "Ana Prueba");
 
-  const rev = dbm.createToken({ name: "Rev" });
-  dbm.db.prepare("UPDATE tokens SET revoked_at = datetime('now') WHERE id = ?").run(rev.id);
+  const rev = await dbm.createToken({ name: "Rev" });
+  await dbm.run("UPDATE tokens SET revoked_at = ? WHERE id = ?", [dbm.nowStr(), rev.id]);
   r = await login(rev.token); assert.equal(r.body.error, "revoked");
 
-  const exp = dbm.createToken({ name: "Exp", expiresInDays: 1 });
-  dbm.db.prepare("UPDATE tokens SET expires_at = datetime('now','-1 day') WHERE id = ?").run(exp.id);
+  const exp = await dbm.createToken({ name: "Exp", expiresInDays: 1 });
+  await dbm.run("UPDATE tokens SET expires_at = ? WHERE id = ?", [dbm.nowStr(new Date(Date.now() - 864e5)), exp.id]);
   r = await login(exp.token); assert.equal(r.body.error, "expired");
 });
 
@@ -83,7 +83,7 @@ test("3. el token nunca se expone: cookie HttpOnly/SameSite y respuestas sin tok
   const me = await (await call("GET", "/api/me", { cookie })).text();
   assert.ok(!me.includes(user.token));
   // En BD solo hay hash
-  const rows = JSON.stringify(dbm.db.prepare("SELECT * FROM tokens").all());
+  const rows = JSON.stringify(await dbm.all("SELECT * FROM tokens"));
   assert.ok(!rows.includes(user.token));
 });
 
@@ -95,7 +95,7 @@ test("CSRF: escritura sin cabecera es rechazada", async () => {
 test("3. sesión inactiva expira y cerrar sesión la invalida", async () => {
   const { cookie } = await login(user.token);
   assert.equal((await call("GET", "/api/tasks", { cookie })).status, 200);
-  dbm.db.prepare("UPDATE sessions SET last_seen = last_seen - 31*60*1000").run();
+  await dbm.run("UPDATE sessions SET last_seen = last_seen - 31*60*1000");
   const r = await call("GET", "/api/tasks", { cookie });
   assert.equal(r.status, 401); assert.equal((await r.json()).error, "session_expired");
 
@@ -156,7 +156,7 @@ test("7. errores de Claude se traducen a mensajes claros", async () => {
 });
 
 test("8. registro de ejecuciones: usuario, tarea, fecha; sin token ni contenido", async () => {
-  const rows = dbm.db.prepare("SELECT * FROM runs").all();
+  const rows = await dbm.all("SELECT * FROM runs");
   assert.ok(rows.length > 5);
   const dump = JSON.stringify(rows);
   assert.ok(!dump.includes(user.token) && !dump.includes("Hola equipo") && !dump.includes("Reunión mañana"));
@@ -166,7 +166,7 @@ test("8. registro de ejecuciones: usuario, tarea, fecha; sin token ni contenido"
 });
 
 test("límite diario por token", async () => {
-  const t = dbm.createToken({ name: "Poco", dailyLimit: 2 });
+  const t = await dbm.createToken({ name: "Poco", dailyLimit: 2 });
   const { cookie } = await login(t.token);
   for (let i = 0; i < 2; i++) assert.equal((await run(cookie, "translate", { text: "x", target: "inglés" })).events.at(-1).t, "done");
   const r = await run(cookie, "translate", { text: "x", target: "inglés" });

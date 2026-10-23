@@ -3,6 +3,7 @@ services:
     build: .
     env_file: server/.env
     environment:
+      # Las rutas de datos ya vienen fijadas en el Dockerfile (dentro del volumen); no las cambies en server/.env.
       DB_PATH: /app/server/data/portal.db
       SKILLS_DIR: /app/server/data/skills-repo
       WORK_DIR: /app/server/data/work
@@ -10,7 +11,13 @@ services:
     ports: ["3000:3000"]
     volumes: ["portal-data:/app/server/data"]
     restart: unless-stopped
-    security_opt: ["no-new-privileges:true"]
+    security_opt:
+      - no-new-privileges:true
+      # El sandbox de scripts (bubblewrap) necesita crear user namespaces, que el perfil seccomp por defecto
+      # de Docker suele bloquear. Comprueba con:  docker compose exec portal npm run check-deploy
+      # Si el sandbox falla, prueba primero SKILL_SANDBOX_WEAKER_NESTED=1 en server/.env; si sigue fallando:
+      #  - seccomp=unconfined     (quita el filtro seccomp de Docker a este contenedor)
+      #  - apparmor=unconfined    (hosts Ubuntu 23.10+ que restringen user namespaces con AppArmor)
     mem_limit: 2g
     pids_limit: 512
 volumes:

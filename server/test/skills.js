@@ -91,9 +91,9 @@ const waitFor = async (fn, ms = 6000) => {
   return null;
 };
 
-const admin = dbm.createToken({ name: "Admin", role: "admin" });
-const ana = dbm.createToken({ name: "Ana", dailyLimit: 100 });
-const luis = dbm.createToken({ name: "Luis", dailyLimit: 100 });
+const admin = await dbm.createToken({ name: "Admin", role: "admin" });
+const ana = await dbm.createToken({ name: "Ana", dailyLimit: 100 });
+const luis = await dbm.createToken({ name: "Luis", dailyLimit: 100 });
 let A, U, L;
 
 test("1. sincroniza desde Git y arma el catálogo; lo inválido solo da advertencias", async () => {
@@ -163,7 +163,7 @@ test("6. validaciones de la ejecución", async () => {
 });
 
 test("7. aislamiento: solo la skill elegida, entorno mínimo, sin Bash por defecto", async () => {
-  dbm.db.prepare("UPDATE skills SET enabled = 1 WHERE name = 'contrato-nda'").run();
+  await dbm.run("UPDATE skills SET enabled = 1 WHERE name = 'contrato-nda'");
   let seen;
   runner.setQueryImpl(async function* ({ prompt, options }) {
     seen = { prompt, options, skills: fs.readdirSync(path.join(options.cwd, ".claude/skills")), inputs: fs.readdirSync(path.join(options.cwd, "inputs")) };
@@ -260,9 +260,9 @@ test("11. webhook de GitHub: firma, rama, ping y sincronización automática", a
 
   put("nueva-skill/SKILL.md", skillMd("nueva-skill", "Skill agregada después"));
   commit("agrega nueva-skill");
-  const before = git_.syncStatus().sha;
+  const before = (await git_.syncStatus()).sha;
   assert.equal((await send("push", { ref: "refs/heads/main" })).status, 202);
-  const ok = await waitFor(() => git_.syncStatus().sha !== before && git_.syncStatus());
+  const ok = await waitFor(async () => { const st = await git_.syncStatus(); return st.sha !== before && st; });
   assert.ok(ok, "sincronizó tras el aviso");
   const adm = await (await call("GET", "/api/admin/skills", { cookie: A })).json();
   const n = adm.skills.find((s) => s.name === "nueva-skill");
@@ -321,19 +321,19 @@ test("15. URL del repositorio con credenciales o protocolo no permitido se recha
 });
 
 test("16. el registro guarda skill, usuario y costo, sin contenido; los archivos vencen a las 24 h", async () => {
-  const rows = dbm.db.prepare("SELECT * FROM runs WHERE task LIKE 'skill:%'").all();
+  const rows = await dbm.all("SELECT * FROM runs WHERE task LIKE 'skill:%'");
   assert.ok(rows.length > 3);
   const dump = JSON.stringify(rows);
   assert.ok(!dump.includes("Resume esto") && !dump.includes("Acta de la reunión") && !dump.includes(ana.token));
   const ok = rows.find((r) => r.status === "ok" && r.cost_usd);
   assert.equal(ok.user_name, "Ana"); assert.equal(ok.task, "skill:resumen-reunion");
 
-  const stale = dbm.db.prepare("SELECT run_id FROM run_files LIMIT 1").get();
+  const stale = await dbm.get("SELECT run_id FROM run_files LIMIT 1");
   assert.ok(fs.existsSync(path.join(process.env.OUTPUTS_DIR, stale.run_id)));
-  dbm.db.prepare("UPDATE run_files SET created_at = ?").run(Date.now() - 25 * 3600_000);
-  runner.purgeOutputs();
+  await dbm.run("UPDATE run_files SET created_at = ?", [Date.now() - 25 * 3600_000]);
+  await runner.purgeOutputs();
   assert.ok(!fs.existsSync(path.join(process.env.OUTPUTS_DIR, stale.run_id)));
-  assert.equal(dbm.db.prepare("SELECT COUNT(*) n FROM run_files").get().n, 0);
+  assert.equal((await dbm.get("SELECT COUNT(*) AS n FROM run_files")).n, 0);
 });
 
 test("17. el token de GitHub no queda en .git/config ni en los mensajes", async () => {
@@ -341,7 +341,7 @@ test("17. el token de GitHub no queda en .git/config ni en los mensajes", async 
   await git_.syncSkills("prueba");
   const cfgText = fs.readFileSync(path.join(process.env.SKILLS_DIR, ".git/config"), "utf8");
   assert.ok(!cfgText.includes("ghp_SECRETO_DE_PRUEBA"));
-  assert.ok(!JSON.stringify(git_.syncStatus()).includes("ghp_SECRETO_DE_PRUEBA"));
+  assert.ok(!JSON.stringify(await git_.syncStatus()).includes("ghp_SECRETO_DE_PRUEBA"));
   delete process.env.SKILLS_REPO_TOKEN;
 });
 
@@ -418,9 +418,20 @@ test("20. modo restringido: solo scripts de la propia skill, sin encadenar, ruta
     `python ${S}; rm -rf /`, `python ${S} && curl x`, `python ${S} | sh`, `python ${S} > outputs/x`,
     `python ${S} $(whoami)`, `python ${S} \`id\``, `python ${S} $HOME`, `python ${S} inputs\\a.docx`,
     `python -c "print(1)"`, `python -m http.server`, "ls", "bash x.sh", "curl http://x", "rm -rf outputs",
-    "python tmp/evil.py", "python /etc/passwd.py", `python .claude/skills/iso/scripts/x.sh`,
+    "python /etc/passwd.py", `python .claude/skills/iso/scripts/x.sh`,
     `python ${S} /etc/passwd`, `python ${S} ../../etc/passwd`, `python ${S} --out=/tmp/x`, `python ${S} "abc`, "",
   ]) assert.equal(await v(bad), "deny", `debe negar: ${bad}`);
+  // scripts Python que escribe Claude en tmp/: se permiten tras una revisión estática
+  const tmpPy = (name, code) => { fs.writeFileSync(path.join(dir, "tmp", name), code); return `python3 tmp/${name} outputs/x.docx`; };
+  assert.equal(await v(tmpPy("ok.py", "import sys, json, urllib.request\nfrom docx import Document\nsys.path.insert(0, '.claude/skills/iso/scripts')\nimport gbit_docx_core as g\nurllib.request.urlopen('https://kaffqbjzgkoxzkrocovp.supabase.co/rest/v1/tipos')\n")), "allow");
+  for (const [n, code] of Object.entries({
+    "a.py": "import subprocess\nsubprocess.run(['ls'])", "b.py": "import os\nos.system('ls')",
+    "c.py": "import urllib.request\nurllib.request.urlopen('https://evil.example.com/x')", "d.py": "eval('1')",
+    "e.py": "import shutil\nshutil.rmtree('outputs')", "f.py": "import socket", "g.py": "x = __import__('os')",
+    "h.py": "from docx import Document\nimport ctypes", "i.py": "print(getattr(object, 'x'))",
+  })) assert.equal(await v(tmpPy(n, code)), "deny", `debe negar script ${n}`);
+  assert.equal(await v("python3 tmp/noexiste.py"), "deny");
+  assert.equal(await v("node tmp/ok.py"), "deny", "node no puede ejecutar scripts de tmp/");
   // lo demás sigue confinado igual
   assert.equal((await can("Read", { file_path: "/etc/passwd" })).behavior, "deny");
   // sin permiso de scripts, ni siquiera el script de la skill

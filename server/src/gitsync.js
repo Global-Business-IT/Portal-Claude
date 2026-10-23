@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
-import { db, kvGet, kvSet } from "./db.js";
+import { batch, kvGet, kvSet, nowStr } from "./db.js";
 
 const exec = promisify(execFile);
 
@@ -136,17 +136,18 @@ export function scanSkills(root) {
   return { skills, warnings };
 }
 
-function applyCatalog(found, sha) {
-  const tx = db.transaction(() => {
-    db.prepare("UPDATE skills SET present = 0").run();
-    const up = db.prepare(
-      `INSERT INTO skills (name, description, has_scripts, present, commit_sha) VALUES (@name, @description, @hasScripts, 1, @sha)
+async function applyCatalog(found, sha) {
+  const now = nowStr();
+  const stmts = [["UPDATE skills SET present = 0"]];
+  for (const sk of found) {
+    stmts.push([
+      `INSERT INTO skills (name, description, has_scripts, present, commit_sha, first_seen, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?)
        ON CONFLICT(name) DO UPDATE SET description = excluded.description, has_scripts = excluded.has_scripts,
-         present = 1, commit_sha = excluded.commit_sha, updated_at = datetime('now')`
-    );
-    for (const s of found) up.run({ ...s, hasScripts: s.hasScripts ? 1 : 0, sha });
-  });
-  tx();
+         present = 1, commit_sha = excluded.commit_sha, updated_at = excluded.updated_at`,
+      [sk.name, sk.description, sk.hasScripts ? 1 : 0, sha, now, now],
+    ]);
+  }
+  await batch(stmts);
 }
 
 // ---------- Sincronización ----------
@@ -154,20 +155,20 @@ function applyCatalog(found, sha) {
 let running = null;
 let queued = false;
 
-export const syncStatus = () =>
-  kvGet("sync_status") || { configured: isConfigured(), ok: null, at: null, sha: null, reason: null, count: 0, warnings: [], error: null };
+export const syncStatus = async () =>
+  (await kvGet("sync_status")) || { configured: isConfigured(), ok: null, at: null, sha: null, reason: null, count: 0, warnings: [], error: null };
 
 async function doSync(reason) {
   const c = cfg();
   const base = { configured: true, at: new Date().toISOString(), reason };
   if (!c.url) {
     const st = { configured: false, ok: null, at: null, sha: null, reason, count: 0, warnings: [], error: "Falta SKILLS_REPO_URL en .env" };
-    kvSet("sync_status", st);
+    await kvSet("sync_status", st);
     return st;
   }
   if (!validateUrl(c.url, c.allowLocal)) {
     const st = { ...base, ok: false, sha: null, count: 0, warnings: [], error: "SKILLS_REPO_URL debe ser una URL https:// sin usuario ni contraseña (el token va en SKILLS_REPO_TOKEN)." };
-    kvSet("sync_status", st);
+    await kvSet("sync_status", st);
     return st;
   }
   try {
@@ -182,15 +183,15 @@ async function doSync(reason) {
     }
     const sha = (await git(["rev-parse", "HEAD"], c, c.dir)).slice(0, 12);
     const { skills, warnings } = scanSkills(skillsRoot());
-    applyCatalog(skills, sha);
+    await applyCatalog(skills, sha);
     const st = { ...base, ok: true, sha, count: skills.length, warnings, error: null };
-    kvSet("sync_status", st);
+    await kvSet("sync_status", st);
     return st;
   } catch (e) {
     // Si falla, se conserva la última copia buena: las skills ya instaladas siguen funcionando.
-    const prev = kvGet("sync_status");
+    const prev = await kvGet("sync_status");
     const st = { ...base, ok: false, sha: prev?.sha ?? null, count: prev?.count ?? 0, warnings: prev?.warnings ?? [], error: e.message };
-    kvSet("sync_status", st);
+    await kvSet("sync_status", st);
     console.error("[sync] error:", e.message);
     return st;
   }

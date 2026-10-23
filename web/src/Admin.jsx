@@ -55,7 +55,7 @@ export default function Admin({ onAuthLost }) {
 
   const patchSkill = (s, patch) => {
     if (patch.scriptsMode === 1 && !window.confirm(`¿Permitir que "${s.name}" ejecute scripts en un entorno aislado? Revisa antes el código en el repositorio.`)) return;
-    if (patch.scriptsMode === 2 && !window.confirm(`Modo restringido para "${s.name}": sus scripts se ejecutan SIN aislamiento del sistema. Solo se permite lanzar los scripts de la propia skill (sin encadenar comandos y con archivos dentro de la carpeta de trabajo). Revisa antes el código de esos scripts en el repositorio. ¿Continuar?`)) return;
+    if (patch.scriptsMode === 2 && !window.confirm(`Modo restringido para "${s.name}": sus scripts se ejecutan SIN aislamiento del sistema. Se permite lanzar los scripts de la skill y scripts Python que Claude escriba en la carpeta de la ejecución, tras una revisión automática (sin subprocess, os.system, borrar archivos, eval/exec, ni conexiones a sitios no permitidos). Es una barrera de mejor esfuerzo, no un aislamiento real. ¿Continuar?`)) return;
     act(() => api("PATCH", `/api/admin/skills/${s.name}`, patch));
   };
   const syncNow = async () => {

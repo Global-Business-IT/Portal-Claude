@@ -1,9 +1,10 @@
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { canConvert, convertToMarkdown } from "./tomarkdown.js";
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { db } from "./db.js";
+import { all, run as dbRun } from "./db.js";
 import { skillsRoot } from "./gitsync.js";
 
 export const MAX_INPUT_FILES = 5;
@@ -110,6 +111,51 @@ const looksLikePath = (v) => /[\/]/.test(v) || v.startsWith("~") || /^[A-Za-z]:/
  * sin encadenar comandos, sin redirecciones y con todas las rutas dentro de la carpeta de la ejecución.
  * Devuelve null si está permitido o un mensaje con el motivo.
  */
+
+/**
+ * Revisión estática (AST) de un script Python escrito por Claude dentro de tmp/ antes de ejecutarlo en modo restringido.
+ * Es una barrera de mejor esfuerzo, no un aislamiento: bloquea lo obvio (subprocess, os.system, borrar, eval/exec,
+ * importar módulos fuera de la lista, URLs a hosts no permitidos).
+ */
+const PY_GUARD = `
+import ast, sys, re
+ALLOW = set(sys.argv[2].split(","))
+HOSTS = set(h for h in sys.argv[3].split(",") if h)
+BAD_ATTR = {"system","popen","Popen","spawn","spawnl","spawnv","execv","execl","execve","fork","check_output","check_call","rmtree","remove","unlink","rmdir","removedirs","kill","__subclasses__","__globals__","__builtins__","__class__","__bases__","__code__"}
+BAD_CALL = {"eval","exec","compile","__import__","getattr","setattr","delattr","globals","locals","vars","input","breakpoint"}
+try:
+    tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+except Exception as e:
+    print("no se pudo leer el script: %s" % e); sys.exit(2)
+def fail(m): print(m); sys.exit(1)
+for n in ast.walk(tree):
+    if isinstance(n, ast.Import):
+        for a in n.names:
+            if a.name.split(".")[0] not in ALLOW: fail("importa un módulo no permitido: " + a.name)
+    elif isinstance(n, ast.ImportFrom):
+        if n.level or (n.module or "").split(".")[0] not in ALLOW: fail("importa un módulo no permitido: " + str(n.module))
+    elif isinstance(n, ast.Attribute):
+        if n.attr in BAD_ATTR: fail("usa una operación no permitida: ." + n.attr)
+    elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in BAD_CALL:
+        fail("usa una función no permitida: " + n.func.id + "()")
+    elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+        for m in re.finditer(r"(?i)\\b[a-z][a-z0-9+.-]*://([^/\\s:?#'\\"]+)", n.value):
+            if m.group(1).lower() not in HOSTS: fail("accede a un sitio no permitido: " + m.group(1))
+`;
+const PY_ALLOWED_MODULES = "docx,openpyxl,PIL,lxml,json,re,sys,os,pathlib,datetime,copy,io,math,itertools,collections,textwrap,unicodedata,string,typing,base64,hashlib,urllib,requests,gbit_docx_core,shutil,zipfile,tempfile,time,decimal,dataclasses,functools,csv,uuid,logging,warnings,xml,enum,statistics,html,difflib,operator,numbers,fractions,calendar,locale,struct,glob,fnmatch,traceback,contextlib,abc,__future__";
+const allowedHosts = () => (process.env.SKILL_SCRIPT_HOSTS ?? "kaffqbjzgkoxzkrocovp.supabase.co").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+const PY_BINS = new Set(["python", "python3", "py"]);
+
+function reviewPythonScript(bin, file) {
+  try {
+    execFileSync(bin, ["-I", "-c", PY_GUARD, file, process.env.SKILL_SCRIPT_MODULES || PY_ALLOWED_MODULES, allowedHosts().join(",")], { stdio: "pipe", timeout: 15000, windowsHide: true });
+    return null;
+  } catch (e) {
+    const out = String(e.stdout ?? "").trim() || String(e.stderr ?? "").trim().split("\n").pop() || "no se pudo revisar el script";
+    return `Revisión de seguridad del script: ${out}.`;
+  }
+}
+
 export function checkRestrictedCommand(command, { root, skillDir }) {
   const cmd = String(command ?? "").trim();
   if (!cmd) return "Comando vacío.";
@@ -125,8 +171,16 @@ export function checkRestrictedCommand(command, { root, skillDir }) {
   } catch {
     return "Ruta de script no válida.";
   }
-  if (!inside(skillDir, resolved) || !SCRIPT_EXTS.has(path.extname(resolved).toLowerCase()) || !fs.existsSync(resolved)) {
-    return "Solo se pueden ejecutar los scripts incluidos en la propia skill.";
+  if (!SCRIPT_EXTS.has(path.extname(resolved).toLowerCase()) || !fs.existsSync(resolved)) {
+    return "Solo se pueden ejecutar scripts .py/.js de la skill (o scripts Python que escribas en tmp/).";
+  }
+  if (!inside(skillDir, resolved)) {
+    // Script escrito por Claude en tmp/: solo Python y tras una revisión estática.
+    if (!inside(path.join(root, "tmp"), resolved) || !PY_BINS.has(bin) || path.extname(resolved).toLowerCase() !== ".py") {
+      return "Solo se pueden ejecutar los scripts de la propia skill, o scripts Python que guardes en ./tmp/ (no en outputs/); ejecútalos con: python tmp/nombre.py";
+    }
+    const why = reviewPythonScript(bin, resolved);
+    if (why) return why;
   }
   for (const a of args) {
     const value = a.startsWith("-") && a.includes("=") ? a.slice(a.indexOf("=") + 1) : a.startsWith("-") ? "" : a;
@@ -156,6 +210,7 @@ export function makeCanUseTool({ runDir, allowScripts, restricted = false, skill
       if (!allowScripts) return deny("Esta skill no tiene permitido ejecutar scripts en el portal.");
       if (restricted) {
         const why = checkRestrictedCommand(input.command, { root, skillDir });
+        if (why) console.warn(`[skill:${skillName}] comando rechazado: ${String(input.command ?? "").slice(0, 200).replace(/\s+/g, " ")} → ${why}`);
         return why ? deny(why) : ok(input);
       }
       return ok(input);
@@ -217,6 +272,9 @@ const RESULT_ERRORS = {
 };
 
 // ---------- Modo simulado (CLAUDE_MOCK=1): imita el flujo del SDK sin gastar ----------
+
+const RESTRICTED_RULES = `
+Ejecución de código en este portal: puedes ejecutar (1) los scripts que vienen dentro de la skill, p. ej. \`python .claude/skills/<skill>/scripts/x.py ...\`, y (2) scripts Python que TÚ escribas en ./tmp/ (no en outputs/), p. ej. escribe ./tmp/build.py con la herramienta Write y ejecútalo con \`python tmp/build.py\` (si "python" falla, usa "python3" o "py"). Un solo comando por vez, sin ;, &&, |, redirecciones ni \`python -c\`. En tus scripts solo importa módulos habituales (python-docx, openpyxl, PIL, json, re, os, sys, pathlib, datetime, urllib, requests y las librerías de la skill, añadiendo su carpeta de scripts a sys.path) y escribe los resultados en ./outputs/. No uses subprocess, os.system, eval/exec ni borres archivos. No uses curl, wget ni WebFetch: para consultar internet (por ejemplo el Supabase de la skill, con sus URL y claves) usa urllib o requests dentro de un script Python en ./tmp/, solo hacia los hosts permitidos (los de la skill). Si un comando es rechazado, lee el motivo y corrígelo en vez de rendirte.`;
 
 async function* mockQuery({ prompt, options }) {
   const cwd = options.cwd;
@@ -294,7 +352,7 @@ function buildEnv(runDir) {
     DISABLE_AUTOUPDATER: "1",
     CLAUDE_AGENT_SDK_CLIENT_APP: "portal-claude/1.0.0",
   };
-  for (const k of ["SystemRoot", "ANTHROPIC_BASE_URL", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"]) {
+  for (const k of ["SystemRoot", "windir", "ComSpec", "PATHEXT", "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "ANTHROPIC_BASE_URL", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"]) {
     if (process.env[k]) env[k] = process.env[k];
   }
   return env;
@@ -379,7 +437,7 @@ export async function runSkill({ name, text, files = [], allowScripts = false, s
       persistSession: false,
       strictMcpConfig: true,
       mcpServers: {},
-      systemPrompt: { type: "preset", preset: "claude_code", append: PORTAL_RULES },
+      systemPrompt: { type: "preset", preset: "claude_code", append: PORTAL_RULES + (restricted ? RESTRICTED_RULES : "") },
       env: buildEnv(runDir),
       stderr: () => {},
       ...(process.env.SKILL_MODEL ? { model: process.env.SKILL_MODEL } : {}),
@@ -390,7 +448,7 @@ export async function runSkill({ name, text, files = [], allowScripts = false, s
               failIfUnavailable: true,
               autoAllowBashIfSandboxed: true,
               allowUnsandboxedCommands: false,
-              network: { allowedDomains: [] },
+              network: { allowedDomains: (process.env.SKILL_SANDBOX_DOMAINS || "").split(",").map((x) => x.trim()).filter(Boolean) },
               filesystem: { allowWrite: [runDir] },
             },
           }
@@ -442,7 +500,7 @@ export async function runSkill({ name, text, files = [], allowScripts = false, s
       fs.mkdirSync(dest, { recursive: true });
       const n = uniqueName(dest, safeName(path.basename(p)));
       fs.copyFileSync(p, path.join(dest, n));
-      db.prepare("INSERT INTO run_files (run_id, token_id, name, size, created_at) VALUES (?,?,?,?,?)").run(runId, tokenId, n, size, Date.now());
+      await dbRun("INSERT INTO run_files (run_id, token_id, name, size, created_at) VALUES (?,?,?,?,?)", [runId, tokenId, n, size, Date.now()]);
       outputs.push({ name: n, size });
     }
     return { runId, outputs, costUsd, chars };
@@ -464,13 +522,17 @@ export async function runSkill({ name, text, files = [], allowScripts = false, s
 }
 
 /** Borra archivos generados con más de OUTPUT_TTL_HOURS horas. */
-export function purgeOutputs() {
+export async function purgeOutputs() {
   const ttl = (Number(process.env.OUTPUT_TTL_HOURS) || 24) * 3_600_000;
   const cutoff = Date.now() - ttl;
-  const old = db.prepare("SELECT DISTINCT run_id FROM run_files WHERE created_at < ?").all(cutoff);
-  for (const { run_id } of old) {
-    fs.rmSync(path.join(outputsRoot(), run_id), { recursive: true, force: true });
-    db.prepare("DELETE FROM run_files WHERE run_id = ?").run(run_id);
+  try {
+    const old = await all("SELECT DISTINCT run_id FROM run_files WHERE created_at < ?", [cutoff]);
+    for (const { run_id } of old) {
+      fs.rmSync(path.join(outputsRoot(), run_id), { recursive: true, force: true });
+      await dbRun("DELETE FROM run_files WHERE run_id = ?", [run_id]);
+    }
+  } catch (e) {
+    console.error("[db] purgeOutputs:", e.message);
   }
   // Carpetas de trabajo huérfanas (por ejemplo tras un reinicio a mitad de una ejecución).
   const wr = workRoot();

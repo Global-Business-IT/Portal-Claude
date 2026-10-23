@@ -8,7 +8,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-import { db, checkToken, createToken, usedToday, logRun } from "./db.js";
+import { all, get, run as dbRun, nowStr, toDate, checkToken, createToken, usedToday, logRun } from "./db.js";
 import { COOKIE, createSession, destroySession, requireSession, requireAdmin } from "./sessions.js";
 import { getTask, publicTasks } from "./tasks.js";
 import { fileToBlock, MAX_FILE_BYTES, UserInputError } from "./files.js";
@@ -106,12 +106,12 @@ export function createApp() {
   });
 
   // ---------- Autenticación ----------
-  app.post("/api/login", loginLimiter, (req, res) => {
-    const r = checkToken(req.body?.token);
+  app.post("/api/login", loginLimiter, async (req, res) => {
+    const r = await checkToken(req.body?.token);
     if (r.error) return res.status(401).json({ error: r.error, message: TOKEN_ERRORS[r.error] });
 
-    db.prepare("UPDATE tokens SET last_used_at = datetime('now') WHERE id = ?").run(r.token.id);
-    const sid = createSession(r.token.id);
+    await dbRun("UPDATE tokens SET last_used_at = ? WHERE id = ?", [nowStr(), r.token.id]);
+    const sid = await createSession(r.token.id);
     res.cookie(COOKIE, sid, {
       httpOnly: true,
       sameSite: "strict",
@@ -122,14 +122,14 @@ export function createApp() {
     res.json({ user: { name: r.token.name, role: r.token.role } });
   });
 
-  app.post("/api/logout", (req, res) => {
-    destroySession(req.cookies?.[COOKIE]);
+  app.post("/api/logout", async (req, res) => {
+    await destroySession(req.cookies?.[COOKIE]);
     res.clearCookie(COOKIE, { path: "/" });
     res.json({ ok: true });
   });
 
-  app.get("/api/me", requireSession, (req, res) => {
-    const used = usedToday(req.user.id);
+  app.get("/api/me", requireSession, async (req, res) => {
+    const used = await usedToday(req.user.id);
     res.json({
       user: { name: req.user.name, role: req.user.role },
       usage: { used, limit: req.user.dailyLimit },
@@ -184,7 +184,7 @@ export function createApp() {
       return reject(400, "missing", "Pega un texto o sube un archivo.", task.id);
 
     // Cuota diaria por token.
-    if (usedToday(req.user.id) >= req.user.dailyLimit)
+    if ((await usedToday(req.user.id)) >= req.user.dailyLimit)
       return reject(
         429,
         "quota",
@@ -253,8 +253,8 @@ export function createApp() {
   });
 
   // ---------- Skills de la empresa ----------
-  app.get("/api/skills", requireSession, (_req, res) => {
-    const rows = db.prepare("SELECT name, description FROM skills WHERE enabled = 1 AND present = 1 ORDER BY name").all();
+  app.get("/api/skills", requireSession, async (_req, res) => {
+    const rows = await all("SELECT name, description FROM skills WHERE enabled = 1 AND present = 1 ORDER BY name");
     res.json({ skills: rows });
   });
 
@@ -272,7 +272,7 @@ export function createApp() {
       return res.status(status).json({ error, message });
     };
 
-    const skill = NAME_RE.test(name) ? db.prepare("SELECT * FROM skills WHERE name = ? AND enabled = 1 AND present = 1").get(name) : null;
+    const skill = NAME_RE.test(name) ? await get("SELECT * FROM skills WHERE name = ? AND enabled = 1 AND present = 1", [name]) : null;
     if (!skill) return reject(404, "not_found", "Esta skill no está disponible.");
 
     const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
@@ -280,7 +280,7 @@ export function createApp() {
     if (text.length > 20_000) return reject(413, "too_large", "El texto es demasiado largo (máximo 20.000 caracteres).");
     if (!text && !files.length) return reject(400, "missing", "Escribe qué necesitas o adjunta un archivo.");
 
-    if (usedToday(req.user.id) >= req.user.dailyLimit)
+    if ((await usedToday(req.user.id)) >= req.user.dailyLimit)
       return reject(429, "quota", `Alcanzaste tu límite de ${req.user.dailyLimit} tareas por hoy. Se restablece mañana o pide ampliarlo al administrador.`);
 
     res.status(200).set({
@@ -338,7 +338,7 @@ export function createApp() {
   app.get("/api/runs/:runId/files/:name", requireSession, async (req, res) => {
     const { runId, name } = req.params;
     if (!/^[a-f0-9]{24}$/.test(runId)) return res.status(404).json({ error: "not_found" });
-    const row = db.prepare("SELECT name FROM run_files WHERE run_id = ? AND name = ? AND token_id = ?").get(runId, name, req.user.id);
+    const row = await get("SELECT name FROM run_files WHERE run_id = ? AND name = ? AND token_id = ?", [runId, name, req.user.id]);
     if (!row) return res.status(404).json({ error: "not_found", message: "El archivo ya no está disponible (se eliminan a las 24 horas)." });
     const root = path.join(outputsRoot(), runId);
     const file = path.join(root, safeName(row.name));
@@ -368,22 +368,23 @@ export function createApp() {
   const admin = express.Router();
   admin.use(requireSession, requireAdmin);
 
-  const tokenView = (t) => ({
+  const tokenView = async (t) => ({
     id: t.id,
     name: t.name,
     role: t.role,
     hint: "…" + t.token_hint,
     dailyLimit: t.daily_limit,
-    usedToday: usedToday(t.id),
+    usedToday: await usedToday(t.id),
     expiresAt: t.expires_at,
     revokedAt: t.revoked_at,
     createdAt: t.created_at,
     lastUsedAt: t.last_used_at,
-    status: t.revoked_at ? "revoked" : t.expires_at && new Date(t.expires_at) < new Date() ? "expired" : "active",
+    status: t.revoked_at ? "revoked" : t.expires_at && toDate(t.expires_at) < new Date() ? "expired" : "active",
   });
 
-  admin.get("/tokens", (_req, res) => {
-    res.json({ tokens: db.prepare("SELECT * FROM tokens ORDER BY id DESC").all().map(tokenView) });
+  admin.get("/tokens", async (_req, res) => {
+    const rows = await all("SELECT * FROM tokens ORDER BY id DESC");
+    res.json({ tokens: await Promise.all(rows.map(tokenView)) });
   });
 
   const parseTokenInput = (b) => {
@@ -395,44 +396,44 @@ export function createApp() {
     return { name, role, dailyLimit, expiresInDays: days };
   };
 
-  admin.post("/tokens", (req, res) => {
+  admin.post("/tokens", async (req, res) => {
     const p = parseTokenInput(req.body);
     if (p.error) return res.status(400).json({ error: "bad_input", message: p.error });
-    const { id, token } = createToken(p);
+    const { id, token } = await createToken(p);
     res.status(201).json({ id, token }); // único momento en que se ve el token completo
   });
 
-  const kill = (id) => {
+  const kill = async (id) => {
     // Las sesiones se dejan: requireSession detecta revoked_at en la siguiente petición,
     // responde "revoked" (mensaje claro para el usuario) y entonces las elimina.
-    db.prepare("UPDATE tokens SET revoked_at = datetime('now') WHERE id = ? AND revoked_at IS NULL").run(id);
+    await dbRun("UPDATE tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", [nowStr(), id]);
   };
 
-  admin.post("/tokens/:id/revoke", (req, res) => {
+  admin.post("/tokens/:id/revoke", async (req, res) => {
     const id = Number(req.params.id);
-    const t = db.prepare("SELECT * FROM tokens WHERE id = ?").get(id);
+    const t = await get("SELECT * FROM tokens WHERE id = ?", [id]);
     if (!t) return res.status(404).json({ error: "not_found", message: "Token no encontrado." });
     if (id === req.user.id) return res.status(400).json({ error: "self", message: "No puedes revocar tu propio token." });
-    kill(id);
+    await kill(id);
     res.json({ ok: true });
   });
 
-  admin.post("/tokens/:id/renew", (req, res) => {
+  admin.post("/tokens/:id/renew", async (req, res) => {
     const id = Number(req.params.id);
-    const t = db.prepare("SELECT * FROM tokens WHERE id = ?").get(id);
+    const t = await get("SELECT * FROM tokens WHERE id = ?", [id]);
     if (!t) return res.status(404).json({ error: "not_found", message: "Token no encontrado." });
     if (id === req.user.id) return res.status(400).json({ error: "self", message: "No puedes renovar tu propio token." });
-    const days = t.expires_at ? Math.max(1, Math.round((new Date(t.expires_at) - new Date(t.created_at + "Z")) / 864e5)) : null;
-    const fresh = createToken({ name: t.name, role: t.role, dailyLimit: t.daily_limit, expiresInDays: days });
-    kill(id);
+    const days = t.expires_at ? Math.max(1, Math.round((toDate(t.expires_at) - toDate(t.created_at)) / 864e5)) : null;
+    const fresh = await createToken({ name: t.name, role: t.role, dailyLimit: t.daily_limit, expiresInDays: days });
+    await kill(id);
     res.status(201).json({ id: fresh.id, token: fresh.token });
   });
 
-  admin.patch("/tokens/:id", (req, res) => {
+  admin.patch("/tokens/:id", async (req, res) => {
     const id = Number(req.params.id);
     const limit = Math.min(Math.max(parseInt(req.body?.dailyLimit, 10) || 0, 1), 5000);
     if (!req.body?.dailyLimit) return res.status(400).json({ error: "bad_input", message: "Indica el nuevo límite diario." });
-    const r = db.prepare("UPDATE tokens SET daily_limit = ? WHERE id = ?").run(limit, id);
+    const r = await dbRun("UPDATE tokens SET daily_limit = ? WHERE id = ?", [limit, id]);
     if (!r.changes) return res.status(404).json({ error: "not_found", message: "Token no encontrado." });
     res.json({ ok: true });
   });
@@ -450,13 +451,13 @@ export function createApp() {
     updatedAt: r.updated_at,
   });
 
-  admin.get("/skills", (_req, res) => {
-    const rows = db.prepare("SELECT * FROM skills ORDER BY present DESC, name").all();
-    res.json({ skills: rows.map(skillView), sync: syncStatus(), restrictedAvailable: restrictedAllowed() });
+  admin.get("/skills", async (_req, res) => {
+    const rows = await all("SELECT * FROM skills ORDER BY present DESC, name");
+    res.json({ skills: rows.map(skillView), sync: await syncStatus(), restrictedAvailable: restrictedAllowed() });
   });
 
-  admin.patch("/skills/:name", (req, res) => {
-    const row = NAME_RE.test(req.params.name) ? db.prepare("SELECT * FROM skills WHERE name = ?").get(req.params.name) : null;
+  admin.patch("/skills/:name", async (req, res) => {
+    const row = NAME_RE.test(req.params.name) ? await get("SELECT * FROM skills WHERE name = ?", [req.params.name]) : null;
     if (!row) return res.status(404).json({ error: "not_found", message: "Skill no encontrada." });
     const enabled = typeof req.body?.enabled === "boolean" ? Number(req.body.enabled) : row.enabled;
     let allow = typeof req.body?.allowScripts === "boolean" ? Number(req.body.allowScripts) : row.allow_scripts;
@@ -467,7 +468,7 @@ export function createApp() {
       allow = m;
     }
     if (enabled && !row.present) return res.status(400).json({ error: "gone", message: "Esa skill ya no está en el repositorio." });
-    db.prepare("UPDATE skills SET enabled = ?, allow_scripts = ? WHERE name = ?").run(enabled, allow, row.name);
+    await dbRun("UPDATE skills SET enabled = ?, allow_scripts = ? WHERE name = ?", [enabled, allow, row.name]);
     res.json({ ok: true });
   });
 
@@ -476,14 +477,13 @@ export function createApp() {
     res.json({ sync: st });
   });
 
-  admin.get("/runs", (req, res) => {
+  admin.get("/runs", async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
-    const rows = db
-      .prepare(
-        `SELECT id, user_name, task, status, error_code, input_chars, output_chars, duration_ms, cost_usd, created_at
-         FROM runs ORDER BY id DESC LIMIT ?`
-      )
-      .all(limit);
+    const rows = await all(
+      `SELECT id, user_name, task, status, error_code, input_chars, output_chars, duration_ms, cost_usd, created_at
+       FROM runs ORDER BY id DESC LIMIT ?`,
+      [limit]
+    );
     res.json({ runs: rows });
   });
 
