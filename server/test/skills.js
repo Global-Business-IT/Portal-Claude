@@ -575,3 +575,20 @@ test("24. cron de mantenimiento: exige CRON_SECRET; limpia y sincroniza", async 
   }
   assert.equal((await call("GET", "/api/cron/maintenance", { headers: { authorization: "Bearer cron-largo-de-prueba" } })).status, 401, "sin CRON_SECRET queda cerrado");
 });
+
+test("25. acceso abierto: sin token entra como invitado con límite propio; el token sigue dando acceso de administrador", async () => {
+  assert.equal((await call("GET", "/api/me", {})).status, 401, "por defecto sigue pidiendo token");
+  setEnv({ OPEN_ACCESS: "1", OPEN_ACCESS_DAILY_LIMIT: "7" });
+  try {
+    const me = await (await call("GET", "/api/me", {})).json();
+    assert.equal(me.user.guest, true); assert.equal(me.user.role, "user"); assert.equal(me.usage.limit, 7);
+    assert.equal((await call("GET", "/api/skills", {})).status, 200);
+    assert.equal((await call("GET", "/api/admin/skills", {})).status, 403, "el invitado no es administrador");
+    const adm = await (await call("GET", "/api/me", { cookie: A })).json();
+    assert.equal(adm.user.role, "admin"); assert.ok(!adm.user.guest);
+    assert.equal((await call("GET", "/api/me", { cookie: "gbl_sid=cookie-falsa" })).status, 200, "cookie inválida → invitado");
+  } finally {
+    restoreEnv();
+  }
+  assert.equal((await call("GET", "/api/me", {})).status, 401);
+});

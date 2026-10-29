@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { get, run, sha256, toDate } from "./db.js";
+import { get, run, sha256, toDate, nowStr } from "./db.js";
 
 const IDLE_MS = (Number(process.env.SESSION_IDLE_MINUTES) || 30) * 60_000;
 const MAX_MS = (Number(process.env.SESSION_MAX_HOURS) || 12) * 3_600_000;
@@ -16,17 +16,43 @@ export async function destroySession(sid) {
   if (sid) await run("DELETE FROM sessions WHERE id_hash = ?", [sha256(sid)]);
 }
 
+// Acceso abierto (OPEN_ACCESS=1): quien entra sin token usa el usuario compartido "Invitado", con límite diario propio.
+// Es temporal y solo para pruebas internas: cualquiera con la dirección puede gastar de la clave de Anthropic.
+const GUEST_NAME = "Invitado (acceso abierto)";
+const openAccess = () => process.env.OPEN_ACCESS === "1";
+async function guestUser() {
+  const limit = Number(process.env.OPEN_ACCESS_DAILY_LIMIT) || 100;
+  let t = await get("SELECT id, role, daily_limit, revoked_at FROM tokens WHERE name = ? AND token_hint = 'abierto'", [GUEST_NAME]);
+  if (!t) {
+    await run("INSERT INTO tokens (name, role, token_hash, token_hint, daily_limit, created_at) VALUES (?,?,?,?,?,?)", [
+      GUEST_NAME, "user", sha256(crypto.randomBytes(32).toString("hex")), "abierto", limit, nowStr(),
+    ]);
+    t = await get("SELECT id, role, daily_limit, revoked_at FROM tokens WHERE name = ? AND token_hint = 'abierto'", [GUEST_NAME]);
+  } else if (t.daily_limit !== limit) {
+    await run("UPDATE tokens SET daily_limit = ? WHERE id = ?", [limit, t.id]);
+  }
+  if (t.revoked_at) return null;
+  return { id: t.id, name: GUEST_NAME, role: "user", dailyLimit: limit, guest: true };
+}
+async function asGuest(req, res, next, error) {
+  if (!openAccess()) return res.status(401).json({ error });
+  const g = await guestUser();
+  if (!g) return res.status(401).json({ error: "revoked" });
+  req.user = g;
+  next();
+}
+
 /** Middleware: exige sesión válida y token vigente (revocación inmediata). */
 export async function requireSession(req, res, next) {
   const sid = req.cookies?.[COOKIE];
-  if (!sid) return res.status(401).json({ error: "no_session" });
+  if (!sid) return asGuest(req, res, next, "no_session");
 
   const row = await get(
     `SELECT s.created_at, s.last_seen, t.id AS tid, t.name, t.role, t.daily_limit, t.expires_at, t.revoked_at
      FROM sessions s JOIN tokens t ON t.id = s.token_id WHERE s.id_hash = ?`,
     [sha256(sid)]
   );
-  if (!row) return res.status(401).json({ error: "no_session" });
+  if (!row) return asGuest(req, res, next, "no_session");
 
   const now = Date.now();
   const dead =
@@ -36,6 +62,7 @@ export async function requireSession(req, res, next) {
     (row.expires_at && toDate(row.expires_at) < new Date());
   if (dead) {
     await destroySession(sid);
+    if (openAccess() && !row.revoked_at) return asGuest(req, res, next, "session_expired");
     return res.status(401).json({ error: row.revoked_at ? "revoked" : "session_expired" });
   }
 

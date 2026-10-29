@@ -135,7 +135,7 @@ export function createApp() {
   app.get("/api/me", requireSession, async (req, res) => {
     const used = await usedToday(req.user.id);
     res.json({
-      user: { name: req.user.name, role: req.user.role },
+      user: { name: req.user.name, role: req.user.role, guest: Boolean(req.user.guest) },
       usage: { used, limit: req.user.dailyLimit },
     });
   });

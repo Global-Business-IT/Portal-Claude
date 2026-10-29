@@ -24,3 +24,6 @@ El proyecto ya trae `vercel.json` y `api/index.js` (toda la API corre como una f
 - Mantenimiento: cron diario `/api/cron/maintenance` (borra archivos de más de 24 h, sesiones vencidas y sincroniza skills).
 - Scripts de skills (modo Bloqueados): en Vercel no hay Python con `python-docx`; las skills con scripts (p. ej. `gbit-doc-iso9001`) quedan pendientes de Vercel Sandbox.
 - Webhook de GitHub: `https://TU-DOMINIO/webhooks/github`.
+
+## Acceso abierto (temporal, sin login)
+Con `OPEN_ACCESS=1` quien abre la página entra directo como "Invitado" (sin token), con un límite diario compartido (`OPEN_ACCESS_DAILY_LIMIT`, por defecto 100). Quien tenga token puede entrar con el botón "Ingresar con token" (administrador). Quitar la variable y hacer Redeploy vuelve a exigir token. Mientras esté activo, cualquiera con la dirección puede gastar de la clave de Anthropic.

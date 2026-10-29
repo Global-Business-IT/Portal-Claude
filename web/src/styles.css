@@ -118,3 +118,9 @@ td.desc { white-space: normal; min-width: 220px; max-width: 420px; }
 .infobtn { width: 38px; border: 1px solid var(--line); background: var(--card); color: var(--muted); border-radius: 10px; cursor: pointer; font-size: 1rem; }
 .infobtn:hover { color: var(--text); border-color: var(--brand); }
 .taskdesc { margin: 0 4px 6px; padding: 8px 10px; font-size: .85rem; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+
+/* Botón estándar "Iniciar sesión con Microsoft" */
+.msbtn { display: flex; align-items: center; justify-content: center; gap: 12px; height: 41px; width: 100%; background: #fff; color: #5e5e5e; border: 1px solid #8c8c8c; border-radius: 2px; font: 600 15px "Segoe UI", system-ui, sans-serif; cursor: pointer; }
+.msbtn:hover { background: #f3f3f3; }
+.msbtn:focus-visible { outline: 2px solid #0067b8; outline-offset: 2px; }
+.linkbtn { background: none; border: 0; color: var(--muted, #667); text-decoration: underline; cursor: pointer; font-size: 13px; padding: 4px; }
