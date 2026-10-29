@@ -461,3 +461,117 @@ test("21. modo restringido: Bash habilitado y sin opciones de sandbox", async ()
   delete process.env.SKILLS_ALLOW_RESTRICTED;
   runner.setQueryImpl(null);
 });
+
+// ---------- Vercel: skills por API de GitHub, Storage de Supabase y cron ----------
+
+const realFetch = globalThis.fetch;
+const withFetch = async (handler, fn) => {
+  globalThis.fetch = (url, init) => handler(String(url), init) ?? realFetch(url, init);
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+};
+const savedEnv = {};
+const setEnv = (o) => Object.entries(o).forEach(([k, v]) => { if (!(k in savedEnv)) savedEnv[k] = process.env[k]; v === undefined ? delete process.env[k] : (process.env[k] = v); });
+const restoreEnv = () => { for (const [k, v] of Object.entries(savedEnv)) v === undefined ? delete process.env[k] : (process.env[k] = v); for (const k of Object.keys(savedEnv)) delete savedEnv[k]; };
+
+test("22. skills por la API de GitHub (sin git): solo la carpeta de skills, sin enlaces, y sin descargar si no hay cambios", async () => {
+  const tar = await import("tar");
+  const src = path.join(tmp, "tarsrc");
+  const top = path.join(src, "acme-skills-abc123");
+  fs.mkdirSync(path.join(top, ".claude/skills/skill-api"), { recursive: true });
+  fs.writeFileSync(path.join(top, ".claude/skills/skill-api/SKILL.md"), skillMd("skill-api", "Viene por API"));
+  fs.writeFileSync(path.join(top, "README.md"), "no debe copiarse");
+  fs.mkdirSync(path.join(top, "otra"), { recursive: true });
+  fs.writeFileSync(path.join(top, "otra/x.txt"), "tampoco");
+  fs.symlinkSync("/etc/passwd", path.join(top, ".claude/skills/skill-api/enlace"));
+  const tgz = path.join(tmp, "repo.tgz");
+  await tar.c({ gzip: true, file: tgz, cwd: src }, ["acme-skills-abc123"]);
+  const bytes = fs.readFileSync(tgz);
+  const SHA = "a".repeat(40);
+  const calls = [];
+  setEnv({ SKILLS_FETCH: "api", SKILLS_REPO_URL: "https://github.com/acme/skills", SKILLS_REPO_TOKEN: "ghp_secreto", SKILLS_DIR: path.join(tmp, "skills-api"), SKILLS_ALLOW_LOCAL: "0" });
+  try {
+    await withFetch((url, init) => {
+      if (!url.startsWith("https://api.github.com/")) return undefined;
+      calls.push(url);
+      assert.equal(init.headers.Authorization, "Bearer ghp_secreto");
+      if (url.endsWith("/commits/main")) return new Response(SHA);
+      if (url.endsWith(`/tarball/${SHA}`)) return new Response(bytes);
+      return new Response("no", { status: 404 });
+    }, async () => {
+      const st = await git_.syncSkills("prueba-api");
+      assert.equal(st.ok, true, st.error);
+      assert.equal(st.sha, SHA.slice(0, 12));
+      const root = git_.skillsRoot();
+      assert.ok(fs.existsSync(path.join(root, "skill-api/SKILL.md")));
+      assert.ok(!fs.existsSync(path.join(root, "skill-api/enlace")), "sin enlaces simbólicos");
+      assert.ok(!fs.existsSync(path.join(process.env.SKILLS_DIR, "README.md")) && !fs.existsSync(path.join(process.env.SKILLS_DIR, "otra")));
+      assert.ok(await dbm.get("SELECT 1 AS x FROM skills WHERE name = 'skill-api' AND present = 1"));
+      const n = calls.length;
+      await git_.syncSkills("prueba-api");
+      assert.equal(calls.filter((c) => c.includes("/tarball/")).length, 1, "mismo commit: no vuelve a descargar");
+      assert.ok(calls.length > n, "pero sí consulta el commit");
+      // arranque en frío: carpeta vacía → ensureSkills la reconstruye
+      fs.rmSync(process.env.SKILLS_DIR, { recursive: true, force: true });
+      await git_.ensureSkills();
+      assert.ok(fs.existsSync(path.join(git_.skillsRoot(), "skill-api/SKILL.md")));
+    });
+    // URL que no es de GitHub en modo API: error claro, sin filtrar el token
+    setEnv({ SKILLS_REPO_URL: "https://gitlab.com/a/b" });
+    const bad = await git_.syncSkills("prueba-api");
+    assert.equal(bad.ok, false);
+    assert.ok(!JSON.stringify(bad).includes("ghp_secreto"));
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("23. Supabase Storage: guarda, firma la descarga y borra; la descarga redirige a la URL firmada", async () => {
+  const st = await import("../src/storage.js");
+  const f = path.join(tmp, "salida.docx");
+  fs.writeFileSync(f, "contenido");
+  const log = [];
+  setEnv({ STORAGE: "supabase", SUPABASE_URL: "https://sb.test", SUPABASE_SERVICE_ROLE_KEY: "sb_secret_x" });
+  try {
+    await withFetch((url, init) => {
+      if (!url.startsWith("https://sb.test/")) return undefined;
+      log.push([init?.method || "GET", url]);
+      assert.equal(init.headers.Authorization, "Bearer sb_secret_x");
+      if (init.method === "POST" && url.includes("/object/sign/")) return Response.json({ signedURL: "/object/sign/portal-files/outputs/r1/a%20b.docx?token=T" });
+      if (init.method === "POST") return Response.json({ Key: "ok" });
+      if (init.method === "DELETE") return Response.json([]);
+      return new Response("x");
+    }, async () => {
+      await st.saveOutput("r1", "a b.docx", f);
+      const t = await st.downloadTarget("r1", "a b.docx");
+      assert.equal(t.url, "https://sb.test/storage/v1/object/sign/portal-files/outputs/r1/a%20b.docx?token=T&download=a%20b.docx");
+      await st.removeRun("r1", ["a b.docx"]);
+    });
+    assert.equal(log[0][1], "https://sb.test/storage/v1/object/portal-files/outputs/r1/a%20b.docx");
+    assert.deepEqual(log.map((l) => l[0]), ["POST", "POST", "DELETE"]);
+    // sin credenciales: error claro
+    setEnv({ SUPABASE_SERVICE_ROLE_KEY: "" });
+    await assert.rejects(() => st.saveOutput("r1", "x", f), /SUPABASE_SERVICE_ROLE_KEY/);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("24. cron de mantenimiento: exige CRON_SECRET; limpia y sincroniza", async () => {
+  setEnv({ CRON_SECRET: "cron-largo-de-prueba" });
+  try {
+    assert.equal((await call("GET", "/api/cron/maintenance", {})).status, 401);
+    const r = await call("GET", "/api/cron/maintenance", { headers: { authorization: "Bearer mal" } });
+    assert.equal(r.status, 401);
+    const ok = await call("GET", "/api/cron/maintenance", { headers: { authorization: "Bearer cron-largo-de-prueba" } });
+    assert.equal(ok.status, 200);
+    const j = await ok.json();
+    assert.equal(j.ok, true); assert.equal(j.outputs, "ok"); assert.equal(j.sessions, "ok");
+  } finally {
+    restoreEnv();
+  }
+  assert.equal((await call("GET", "/api/cron/maintenance", { headers: { authorization: "Bearer cron-largo-de-prueba" } })).status, 401, "sin CRON_SECRET queda cerrado");
+});

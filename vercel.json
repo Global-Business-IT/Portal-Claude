@@ -1,0 +1,20 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "npm --prefix server install && npm --prefix web install",
+  "buildCommand": "npm --prefix web run build",
+  "outputDirectory": "web/dist",
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 300,
+      "memory": 2048,
+      "includeFiles": "server/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/**",
+      "excludeFiles": "{server/node_modules/better-sqlite3/**,web/**,skills-empresa/**,vercel-spike/**}"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index" },
+    { "source": "/webhooks/(.*)", "destination": "/api/index" },
+    { "source": "/((?!api/|webhooks/).*)", "destination": "/index.html" }
+  ],
+  "crons": [{ "path": "/api/cron/maintenance", "schedule": "0 5 * * *" }]
+}

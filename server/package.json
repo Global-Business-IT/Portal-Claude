@@ -11,7 +11,6 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.293",
     "@anthropic-ai/sdk": "^0.131.0",
-    "better-sqlite3": "^13.0.3",
     "cookie-parser": "^1.4.7",
     "docx": "^9.9.0",
     "dotenv": "^18.0.5",
@@ -23,8 +22,11 @@
     "multer": "^2.4.0",
     "pdfkit": "^0.20.2",
     "pg": "^8.23.1",
-    "portal-claude": "file:..",
+    "tar": "^7.5.22",
     "yaml": "^2.9.1"
   },
-  "type": "module"
+  "type": "module",
+  "optionalDependencies": {
+    "better-sqlite3": "^13.0.3"
+  }
 }

@@ -15,7 +15,10 @@ async function parse(res) {
   } catch {
     /* sin cuerpo JSON */
   }
-  if (!res.ok) throw new ApiError(res.status, body);
+  if (!res.ok) {
+    if (!body && res.status === 413) body = { error: "too_large", message: "Los archivos superan el tamaño máximo permitido (4 MB en total). Sube archivos más pequeños." };
+    throw new ApiError(res.status, body);
+  }
   return body;
 }
 

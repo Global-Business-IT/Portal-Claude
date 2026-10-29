@@ -5,15 +5,16 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { all, run as dbRun } from "./db.js";
-import { skillsRoot } from "./gitsync.js";
+import { skillsRoot, ensureSkills } from "./gitsync.js";
+import { outputsRoot, saveOutput, removeRun } from "./storage.js";
 
 export const MAX_INPUT_FILES = 5;
-export const MAX_INPUT_FILE_BYTES = 10 * 1024 * 1024;
+export const MAX_INPUT_FILE_BYTES = (process.env.VERCEL ? 4 : 10) * 1024 * 1024;
 const MAX_OUTPUT_FILES = 20;
 const MAX_OUTPUT_FILE_BYTES = 25 * 1024 * 1024;
 
-const workRoot = () => path.resolve(process.env.WORK_DIR || "./data/work");
-export const outputsRoot = () => path.resolve(process.env.OUTPUTS_DIR || "./data/outputs");
+const workRoot = () => path.resolve(process.env.WORK_DIR || (process.env.VERCEL ? "/tmp/work" : "./data/work"));
+export { outputsRoot };
 
 export class SkillRunError extends Error {
   constructor(code, message) {
@@ -44,6 +45,25 @@ function uniqueName(dir, name) {
     if (!fs.existsSync(path.join(dir, c))) return c;
   }
   return `${crypto.randomBytes(4).toString("hex")}-${name}`;
+}
+
+function uniqueAmong(taken, name) {
+  if (!taken.includes(name)) return name;
+  const ext = path.extname(name);
+  const base = name.slice(0, name.length - ext.length);
+  for (let i = 2; i < 100; i++) {
+    const c = `${base} (${i})${ext}`;
+    if (!taken.includes(c)) return c;
+  }
+  return `${crypto.randomBytes(4).toString("hex")}-${name}`;
+}
+
+/** Binario nativo del SDK: en Vercel se empaqueta con la función y se indica la ruta explícita. */
+function claudeBinary() {
+  if (process.env.CLAUDE_BIN) return process.env.CLAUDE_BIN;
+  if (!process.env.VERCEL) return null;
+  const p = path.join(process.cwd(), "server/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude");
+  return fs.existsSync(p) ? p : null;
 }
 
 /** Copia una carpeta ignorando enlaces simbólicos (no deben apuntar fuera de la skill). */
@@ -371,6 +391,7 @@ export async function runSkill({ name, text, files = [], allowScripts = false, s
   if (active >= maxConcurrent()) {
     throw new SkillRunError("busy", "Hay muchas skills ejecutándose en este momento. Inténtalo de nuevo en un minuto.");
   }
+  await ensureSkills();
   const src = path.join(skillsRoot(), name);
   if (!fs.existsSync(path.join(src, "SKILL.md"))) {
     throw new SkillRunError("not_found", "Esta skill ya no está disponible.");
@@ -386,7 +407,7 @@ export async function runSkill({ name, text, files = [], allowScripts = false, s
   const timer = setTimeout(() => {
     timedOut = true;
     ac.abort();
-  }, (Number(process.env.SKILL_TIMEOUT_SEC) || 300) * 1000);
+  }, (Number(process.env.SKILL_TIMEOUT_SEC) || (process.env.VERCEL ? 270 : 300)) * 1000);
 
   try {
     for (const d of ["inputs", "outputs", "tmp", "home"]) fs.mkdirSync(path.join(runDir, d), { recursive: true });
@@ -440,6 +461,7 @@ export async function runSkill({ name, text, files = [], allowScripts = false, s
       systemPrompt: { type: "preset", preset: "claude_code", append: PORTAL_RULES + (restricted ? RESTRICTED_RULES : "") },
       env: buildEnv(runDir),
       stderr: () => {},
+      ...(claudeBinary() ? { pathToClaudeCodeExecutable: claudeBinary() } : {}),
       ...(process.env.SKILL_MODEL ? { model: process.env.SKILL_MODEL } : {}),
       ...(allowScripts && !restricted
         ? {
@@ -493,13 +515,11 @@ export async function runSkill({ name, text, files = [], allowScripts = false, s
 
     // Archivos generados: se mueven a un lugar propio y se registran para su dueño.
     const outputs = [];
-    const dest = path.join(outputsRoot(), runId);
     for (const p of collectOutputs(path.join(runDir, "outputs")).slice(0, MAX_OUTPUT_FILES)) {
       const size = fs.statSync(p).size;
       if (size > MAX_OUTPUT_FILE_BYTES || size === 0) continue;
-      fs.mkdirSync(dest, { recursive: true });
-      const n = uniqueName(dest, safeName(path.basename(p)));
-      fs.copyFileSync(p, path.join(dest, n));
+      const n = uniqueAmong(outputs.map((o) => o.name), safeName(path.basename(p)));
+      await saveOutput(runId, n, p);
       await dbRun("INSERT INTO run_files (run_id, token_id, name, size, created_at) VALUES (?,?,?,?,?)", [runId, tokenId, n, size, Date.now()]);
       outputs.push({ name: n, size });
     }
@@ -526,9 +546,11 @@ export async function purgeOutputs() {
   const ttl = (Number(process.env.OUTPUT_TTL_HOURS) || 24) * 3_600_000;
   const cutoff = Date.now() - ttl;
   try {
-    const old = await all("SELECT DISTINCT run_id FROM run_files WHERE created_at < ?", [cutoff]);
-    for (const { run_id } of old) {
-      fs.rmSync(path.join(outputsRoot(), run_id), { recursive: true, force: true });
+    const old = await all("SELECT run_id, name FROM run_files WHERE created_at < ?", [cutoff]);
+    const byRun = new Map();
+    for (const { run_id, name } of old) byRun.set(run_id, [...(byRun.get(run_id) || []), name]);
+    for (const [run_id, names] of byRun) {
+      await removeRun(run_id, names);
       await dbRun("DELETE FROM run_files WHERE run_id = ?", [run_id]);
     }
   } catch (e) {

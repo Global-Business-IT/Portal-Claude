@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, streamRun, ApiError } from "./api.js";
 import Markdown from "./Markdown.jsx";
 
@@ -13,18 +13,20 @@ export default function Portal({ onAuthLost, onRan }) {
   const [forms, setForms] = useState({});
   const [files, setFiles] = useState({});
   const [out, setOut] = useState({}); // por tarea: { text, status, error }
+  const [openInfo, setOpenInfo] = useState({}); // skills cuya descripción está desplegada
   const [fileReset, setFileReset] = useState(0); // fuerza a vaciar el selector de archivos al pulsar "Quitar"
   const abortRef = useRef(null);
 
   useEffect(() => {
-    Promise.all([api("GET", "/api/tasks"), api("GET", "/api/skills").catch(() => ({ skills: [] }))])
-      .then(([d, s]) => {
+    api("GET", "/api/skills")
+      .then((s) => {
         const skills = s.skills.map((k) => ({
           id: "skill:" + k.name, kind: "skill", skill: k.name, title: k.name, description: k.description, needs: "textOrFile",
           fields: [{ name: "text", label: "¿Qué necesitas?", type: "textarea" }, { name: "files", label: `Archivos (opcional, hasta ${MAX_FILES}, ${MAX_MB} MB c/u)`, type: "files" }],
         }));
-        setTasks([...d.tasks, ...skills]);
-        setCurrent(d.tasks[0]?.id);
+        // Solo se muestran las skills de la empresa (las tareas básicas del portal quedan ocultas).
+        setTasks(skills);
+        setCurrent(skills[0]?.id);
       })
       .catch((e) => (e.status === 401 ? onAuthLost(e) : setTasks([])));
     return () => abortRef.current?.abort();
@@ -32,7 +34,7 @@ export default function Portal({ onAuthLost, onRan }) {
 
   if (!tasks) return <p className="muted">Cargando tareas…</p>;
   const task = tasks.find((t) => t.id === current);
-  if (!task) return <p className="muted">No hay tareas disponibles.</p>;
+  if (!task) return <p className="muted">Todavía no hay skills disponibles. Pide al administrador que active alguna.</p>;
 
   const values = forms[task.id] || {};
   const isSkill = task.kind === "skill";
@@ -123,14 +125,25 @@ export default function Portal({ onAuthLost, onRan }) {
   return (
     <div className="grid">
       <aside className="list" aria-label="Tareas">
-        {tasks.map((t, i) => (
-          <Fragment key={t.id}>
-          {t.kind === "skill" && tasks[i - 1]?.kind !== "skill" && <h4 className="listhead">Skills de la empresa</h4>}
-          <button className={`task ${t.id === current ? "on" : ""}`} onClick={() => setCurrent(t.id)} disabled={running && t.id !== current}>
-            <strong>{t.title}</strong>
-            <span className="muted">{t.description}</span>
-          </button>
-          </Fragment>
+        {tasks.map((t) => (
+          <div key={t.id} className={`taskrow ${t.id === current ? "on" : ""}`}>
+            <div className="taskhead">
+              <button className="task" onClick={() => setCurrent(t.id)} disabled={running && t.id !== current}>
+                <strong>{t.title}</strong>
+              </button>
+              <button
+                type="button"
+                className="infobtn"
+                aria-expanded={Boolean(openInfo[t.id])}
+                aria-label={`${openInfo[t.id] ? "Ocultar" : "Ver"} descripción de ${t.title}`}
+                title="Ver descripción"
+                onClick={() => setOpenInfo((o) => ({ ...o, [t.id]: !o[t.id] }))}
+              >
+                {openInfo[t.id] ? "▴" : "▾"}
+              </button>
+            </div>
+            {openInfo[t.id] && <p className="taskdesc muted">{t.description}</p>}
+          </div>
         ))}
       </aside>
 

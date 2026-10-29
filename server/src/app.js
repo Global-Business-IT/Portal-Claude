@@ -14,8 +14,10 @@ import { getTask, publicTasks } from "./tasks.js";
 import { fileToBlock, MAX_FILE_BYTES, UserInputError } from "./files.js";
 import { runStream, friendlyError, MODEL } from "./claude.js";
 import { syncSkills, syncStatus, cfg as gitCfg, NAME_RE } from "./gitsync.js";
+import { downloadTarget, readOutput, serverless } from "./storage.js";
+import { purgeSessions } from "./sessions.js";
 import { mdToDocx, mdToPdf } from "./convert.js";
-import { runSkill, restrictedAllowed, SkillRunError, safeName, outputsRoot, MAX_INPUT_FILES, MAX_INPUT_FILE_BYTES } from "./skillrunner.js";
+import { runSkill, restrictedAllowed, SkillRunError, safeName, purgeOutputs, MAX_INPUT_FILES, MAX_INPUT_FILE_BYTES } from "./skillrunner.js";
 
 const MAX_INPUT_CHARS = 60_000;
 const isProd = process.env.NODE_ENV === "production";
@@ -29,7 +31,7 @@ const TOKEN_ERRORS = {
 
 export function createApp() {
   const app = express();
-  app.set("trust proxy", Number(process.env.TRUST_PROXY) || 0);
+  app.set("trust proxy", Number(process.env.TRUST_PROXY) || (process.env.VERCEL ? 1 : 0));
   app.disable("x-powered-by");
 
   app.use(
@@ -50,7 +52,7 @@ export function createApp() {
   // ---------- Aviso de GitHub (webhook) ----------
   // Va antes de express.json porque la firma se calcula sobre el cuerpo original.
   const webhookLimiter = rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false });
-  app.post("/webhooks/github", webhookLimiter, express.raw({ type: "*/*", limit: "5mb" }), (req, res) => {
+  app.post("/webhooks/github", webhookLimiter, express.raw({ type: "*/*", limit: "5mb" }), async (req, res) => {
     const secret = process.env.GITHUB_WEBHOOK_SECRET;
     if (!secret) return res.status(503).json({ error: "webhook_disabled" });
 
@@ -73,8 +75,10 @@ export function createApp() {
     }
     if (payload.ref !== `refs/heads/${gitCfg().branch}`) return res.status(202).json({ ok: true, ignored: "otra rama" });
 
-    syncSkills("aviso de GitHub").catch(() => {});
-    res.status(202).json({ ok: true, syncing: true });
+    // En serverless la función se congela al responder: hay que esperar a que termine la sincronización.
+    const job = syncSkills("aviso de GitHub").catch(() => {});
+    if (serverless) await job;
+    res.status(202).json({ ok: true, syncing: !serverless });
   });
 
   app.use(express.json({ limit: "100kb" }));
@@ -338,19 +342,18 @@ export function createApp() {
   app.get("/api/runs/:runId/files/:name", requireSession, async (req, res) => {
     const { runId, name } = req.params;
     if (!/^[a-f0-9]{24}$/.test(runId)) return res.status(404).json({ error: "not_found" });
-    const row = await get("SELECT name FROM run_files WHERE run_id = ? AND name = ? AND token_id = ?", [runId, name, req.user.id]);
+    const row = await get("SELECT name, size FROM run_files WHERE run_id = ? AND name = ? AND token_id = ?", [runId, name, req.user.id]);
     if (!row) return res.status(404).json({ error: "not_found", message: "El archivo ya no está disponible (se eliminan a las 24 horas)." });
-    const root = path.join(outputsRoot(), runId);
-    const file = path.join(root, safeName(row.name));
-    if (path.relative(root, file).startsWith("..") || !fs.existsSync(file)) {
-      return res.status(404).json({ error: "not_found", message: "El archivo ya no está disponible (se eliminan a las 24 horas)." });
-    }
+    const fname = safeName(row.name);
+    const notFound = () => res.status(404).json({ error: "not_found", message: "El archivo ya no está disponible (se eliminan a las 24 horas)." });
     res.set("X-Content-Type-Options", "nosniff");
     // Los .md se pueden bajar también como Word o PDF (?format=docx|pdf).
     const fmt = String(req.query.format || "");
-    if ((fmt === "docx" || fmt === "pdf") && /\.(md|markdown)$/i.test(row.name) && fs.statSync(file).size <= 2 * 1024 * 1024) {
+    if ((fmt === "docx" || fmt === "pdf") && /\.(md|markdown)$/i.test(row.name) && row.size <= 2 * 1024 * 1024) {
       try {
-        const md = fs.readFileSync(file, "utf8");
+        const raw = await readOutput(runId, fname);
+        if (!raw) return notFound();
+        const md = raw.toString("utf8");
         const buf = fmt === "docx" ? await mdToDocx(md) : await mdToPdf(md);
         const base = row.name.replace(/\.(md|markdown)$/i, "");
         res.set("Content-Type", fmt === "docx" ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" : "application/pdf");
@@ -361,7 +364,15 @@ export function createApp() {
         return res.status(500).json({ error: "convert_failed", message: "No se pudo convertir el archivo. Descárgalo en su formato original." });
       }
     }
-    res.download(file, row.name);
+    try {
+      const target = await downloadTarget(runId, fname);
+      if (!target) return notFound();
+      if (target.url) return res.redirect(302, target.url); // Supabase Storage: URL firmada de 2 minutos
+      return res.download(target.path, row.name);
+    } catch (e) {
+      console.error("[storage] error:", e.message);
+      return res.status(502).json({ error: "storage", message: "No se pudo obtener el archivo. Inténtalo de nuevo." });
+    }
   });
 
   // ---------- Administración ----------
@@ -488,6 +499,19 @@ export function createApp() {
   });
 
   app.use("/api/admin", admin);
+
+  // Mantenimiento programado (Vercel Cron llama con GET y "Authorization: Bearer $CRON_SECRET").
+  app.get("/api/cron/maintenance", async (req, res) => {
+    const secret = process.env.CRON_SECRET || "";
+    const got = Buffer.from(String(req.get("authorization") || ""));
+    const want = Buffer.from(`Bearer ${secret}`);
+    if (!secret || got.length !== want.length || !crypto.timingSafeEqual(got, want)) return res.status(401).json({ error: "unauthorized" });
+    const out = {};
+    try { await purgeOutputs(); out.outputs = "ok"; } catch (e) { out.outputs = e.message; }
+    try { await purgeSessions(); out.sessions = "ok"; } catch (e) { out.sessions = e.message; }
+    try { const st = await syncSkills("programada"); out.skills = st.ok ? `ok (${st.count})` : st.error; } catch (e) { out.skills = e.message; }
+    res.json({ ok: true, ...out });
+  });
 
   app.get("/api/health", (_req, res) => res.json({ ok: true, model: MODEL }));
   app.use("/api", (_req, res) => res.status(404).json({ error: "not_found" }));

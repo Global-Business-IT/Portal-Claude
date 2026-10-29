@@ -1,6 +1,7 @@
 import ExcelJS from "exceljs";
 
-export const MAX_FILE_BYTES = 10 * 1024 * 1024;
+// Vercel limita el cuerpo de la solicitud a 4,5 MB en total.
+export const MAX_FILE_BYTES = (process.env.VERCEL ? 4 : 10) * 1024 * 1024;
 export const MAX_TEXT_CHARS = 120_000;
 
 const TEXT_EXT = new Set(["txt", "md", "csv", "json", "tsv", "log"]);

@@ -3,6 +3,9 @@ import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
+import * as tar from "tar";
+import { Readable } from "node:stream";
+import { once } from "node:events";
 import { batch, kvGet, kvSet, nowStr } from "./db.js";
 
 const exec = promisify(execFile);
@@ -15,10 +18,17 @@ export const cfg = () => ({
   url: process.env.SKILLS_REPO_URL || "",
   branch: process.env.SKILLS_REPO_BRANCH || "main",
   token: process.env.SKILLS_REPO_TOKEN || "",
-  dir: path.resolve(process.env.SKILLS_DIR || "./data/skills-repo"),
+  dir: path.resolve(process.env.SKILLS_DIR || (process.env.VERCEL ? "/tmp/skills-repo" : "./data/skills-repo")),
   sub: process.env.SKILLS_SUBDIR || ".claude/skills",
   allowLocal: process.env.SKILLS_ALLOW_LOCAL === "1", // solo para pruebas
 });
+
+/** "api" = descarga el repo con la API de GitHub (sin git; para Vercel). "git" = clon/fetch con git. */
+export const fetchMode = () => {
+  const m = (process.env.SKILLS_FETCH || "").toLowerCase();
+  if (m === "api" || m === "git") return m;
+  return process.env.VERCEL ? "api" : "git";
+};
 
 export const skillsRoot = () => {
   const c = cfg();
@@ -61,6 +71,93 @@ async function git(args, c, cwd) {
     if (c.token) msg = msg.split(c.token).join("***");
     throw new Error(msg || "falló git");
   }
+}
+
+// ---------- Descarga por la API de GitHub ----------
+
+const MAX_TARBALL_BYTES = 100 * 1024 * 1024;
+
+function parseGithub(url) {
+  const m = String(url).match(/^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/);
+  if (!m) throw new Error("En modo API, SKILLS_REPO_URL debe ser https://github.com/<organización>/<repositorio>.");
+  return { owner: m[1], repo: m[2] };
+}
+
+const ghHeaders = (c, accept = "application/vnd.github+json") => ({
+  Accept: accept,
+  "User-Agent": "portal-claude",
+  "X-GitHub-Api-Version": "2022-11-28",
+  ...(c.token ? { Authorization: `Bearer ${c.token}` } : {}),
+});
+
+async function ghFetch(url, c, accept) {
+  const r = await fetch(url, { headers: ghHeaders(c, accept), signal: AbortSignal.timeout(60_000) });
+  if (!r.ok) {
+    const hint = r.status === 404 || r.status === 401 ? " (revisa SKILLS_REPO_URL, la rama y el permiso del token)" : "";
+    throw new Error(`GitHub respondió ${r.status}${hint}`);
+  }
+  return r;
+}
+
+export const localSha = (dir = cfg().dir) => {
+  try {
+    return fs.readFileSync(path.join(dir, ".sha"), "utf8").trim();
+  } catch {
+    return "";
+  }
+};
+
+/** Descarga la rama y deja en c.dir solo c.sub (sin enlaces). Devuelve el sha completo del commit. */
+async function fetchViaApi(c) {
+  const { owner, repo } = parseGithub(c.url);
+  const api = `https://api.github.com/repos/${owner}/${repo}`;
+  const sha = (await (await ghFetch(`${api}/commits/${encodeURIComponent(c.branch)}`, c, "application/vnd.github.sha")).text()).trim();
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("GitHub devolvió un commit no válido.");
+  if (localSha(c.dir) === sha && fs.existsSync(path.join(c.dir, c.sub))) return sha; // ya está al día
+
+  const r = await ghFetch(`${api}/tarball/${sha}`, c);
+  const len = Number(r.headers.get("content-length") || 0);
+  if (len > MAX_TARBALL_BYTES) throw new Error("El repositorio de skills es demasiado grande.");
+
+  const tmp = `${c.dir}.tmp-${process.pid}-${Date.now()}`;
+  fs.rmSync(tmp, { recursive: true, force: true });
+  fs.mkdirSync(tmp, { recursive: true });
+  try {
+    let bytes = 0;
+    const prefix = c.sub.replace(/^\/+|\/+$/g, "");
+    const unpack = tar.x({
+      cwd: tmp,
+      strip: 1,
+      // Solo la carpeta de skills; sin enlaces simbólicos ni duros.
+      filter: (p, entry) => {
+        const rel = p.split("/").slice(1).join("/");
+        const t = entry?.type;
+        if (t === "SymbolicLink" || t === "Link") return false;
+        return rel === prefix || rel.startsWith(prefix + "/") || prefix.startsWith(rel + "/") || rel === "";
+      },
+    });
+    // "close" (no "finish"): tar escribe los archivos de forma asíncrona y hay que esperar a que terminen.
+    const closed = new Promise((res, rej) => {
+      unpack.on("close", res);
+      unpack.on("error", rej);
+    });
+    // tar 7 usa minipass (no streams de Node): se escribe a mano respetando la contrapresión.
+    for await (const chunk of Readable.fromWeb(r.body)) {
+      bytes += chunk.length;
+      if (bytes > MAX_TARBALL_BYTES) throw new Error("El repositorio de skills es demasiado grande.");
+      if (!unpack.write(chunk)) await once(unpack, "drain");
+    }
+    unpack.end();
+    await closed;
+    fs.mkdirSync(path.join(tmp, prefix), { recursive: true });
+    fs.writeFileSync(path.join(tmp, ".sha"), sha);
+    fs.rmSync(c.dir, { recursive: true, force: true });
+    fs.renameSync(tmp, c.dir);
+  } catch (e) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    throw e;
+  }
+  return sha;
 }
 
 // ---------- Lectura del catálogo ----------
@@ -173,15 +270,20 @@ async function doSync(reason) {
   }
   try {
     fs.mkdirSync(path.dirname(c.dir), { recursive: true });
-    if (!fs.existsSync(path.join(c.dir, ".git"))) {
-      fs.rmSync(c.dir, { recursive: true, force: true });
-      await git(["clone", "--depth", "1", "--branch", c.branch, "--single-branch", c.url, c.dir], c, path.dirname(c.dir));
+    let sha;
+    if (fetchMode() === "api") {
+      sha = (await fetchViaApi(c)).slice(0, 12);
     } else {
-      await git(["fetch", "--depth", "1", "origin", c.branch], c, c.dir);
-      await git(["reset", "--hard", "FETCH_HEAD"], c, c.dir);
-      await git(["clean", "-fdx"], c, c.dir);
+      if (!fs.existsSync(path.join(c.dir, ".git"))) {
+        fs.rmSync(c.dir, { recursive: true, force: true });
+        await git(["clone", "--depth", "1", "--branch", c.branch, "--single-branch", c.url, c.dir], c, path.dirname(c.dir));
+      } else {
+        await git(["fetch", "--depth", "1", "origin", c.branch], c, c.dir);
+        await git(["reset", "--hard", "FETCH_HEAD"], c, c.dir);
+        await git(["clean", "-fdx"], c, c.dir);
+      }
+      sha = (await git(["rev-parse", "HEAD"], c, c.dir)).slice(0, 12);
     }
-    const sha = (await git(["rev-parse", "HEAD"], c, c.dir)).slice(0, 12);
     const { skills, warnings } = scanSkills(skillsRoot());
     await applyCatalog(skills, sha);
     const st = { ...base, ok: true, sha, count: skills.length, warnings, error: null };
@@ -211,4 +313,21 @@ export function syncSkills(reason = "manual") {
     }
   });
   return running;
+}
+
+/**
+ * Garantiza que la copia local de las skills exista y esté al día antes de ejecutar una.
+ * En Vercel cada instancia tiene su propio /tmp (vacío en frío) y el aviso de GitHub puede caer en otra
+ * instancia, así que se compara con el commit registrado en la base de datos.
+ */
+export async function ensureSkills() {
+  if (!isConfigured()) return;
+  const c = cfg();
+  if (fetchMode() === "api") {
+    const st = await syncStatus();
+    const have = localSha(c.dir);
+    if (!have || !fs.existsSync(skillsRoot()) || (st.sha && !have.startsWith(st.sha))) await syncSkills("actualización local");
+  } else if (!fs.existsSync(skillsRoot())) {
+    await syncSkills("arranque en frío");
+  }
 }
