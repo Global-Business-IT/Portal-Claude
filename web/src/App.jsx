@@ -91,7 +91,15 @@ export default function App() {
         {view === "admin" && isAdmin ? (
           <Admin onAuthLost={onAuthLost} />
         ) : (
-          <Portal onAuthLost={onAuthLost} onRan={refreshUsage} />
+          <Portal
+            onAuthLost={onAuthLost}
+            onRan={refreshUsage}
+            guest={Boolean(me.user.guest)}
+            onLoggedIn={(d) => {
+              refreshUsage();
+              setMe({ user: d.user, usage: null });
+            }}
+          />
         )}
       </main>
     </div>

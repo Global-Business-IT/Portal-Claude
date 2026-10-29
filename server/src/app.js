@@ -9,7 +9,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { all, get, run as dbRun, nowStr, toDate, checkToken, createToken, usedToday, logRun } from "./db.js";
-import { COOKIE, createSession, destroySession, requireSession, requireAdmin } from "./sessions.js";
+import { COOKIE, createSession, destroySession, requireSession, requireAdmin, requireToken } from "./sessions.js";
 import { getTask, publicTasks } from "./tasks.js";
 import { fileToBlock, MAX_FILE_BYTES, UserInputError } from "./files.js";
 import { runStream, friendlyError, MODEL } from "./claude.js";
@@ -145,7 +145,7 @@ export function createApp() {
   // ---------- Ejecución de tareas ----------
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_FILE_BYTES, files: 1 } });
 
-  app.post("/api/run", requireSession, runLimiter, upload.single("file"), async (req, res) => {
+  app.post("/api/run", requireSession, requireToken, runLimiter, upload.single("file"), async (req, res) => {
     const started = Date.now();
     const base = { token_id: req.user.id, user_name: req.user.name };
     const reject = (status, error, message, task = "?") => {
@@ -267,7 +267,7 @@ export function createApp() {
     limits: { fileSize: MAX_INPUT_FILE_BYTES, files: MAX_INPUT_FILES },
   });
 
-  app.post("/api/skills/run", requireSession, runLimiter, uploadSkill.array("files", MAX_INPUT_FILES), async (req, res) => {
+  app.post("/api/skills/run", requireSession, requireToken, runLimiter, uploadSkill.array("files", MAX_INPUT_FILES), async (req, res) => {
     const started = Date.now();
     const base = { token_id: req.user.id, user_name: req.user.name };
     const name = String(req.body?.skill ?? "");

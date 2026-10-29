@@ -592,3 +592,21 @@ test("25. acceso abierto: sin token entra como invitado con límite propio; el t
   }
   assert.equal((await call("GET", "/api/me", {})).status, 401);
 });
+
+test("26. acceso abierto: el invitado ve las skills pero ejecutar exige token", async () => {
+  setEnv({ OPEN_ACCESS: "1" });
+  try {
+    const form = new FormData();
+    form.set("skill", "resumen-reunion"); form.set("text", "hola");
+    const r = await call("POST", "/api/skills/run", { form });
+    assert.equal(r.status, 401);
+    assert.equal((await r.json()).error, "token_required");
+    const r2 = await call("POST", "/api/run", { json: { task: "email" } });
+    assert.equal(r2.status, 401);
+    assert.equal((await call("GET", "/api/skills", {})).status, 200, "ver la lista no exige token");
+    // con token sí se ejecuta
+    assert.equal((await runSkill(U, "resumen-reunion", "hola")).events.at(-1).t, "done");
+  } finally {
+    restoreEnv();
+  }
+});

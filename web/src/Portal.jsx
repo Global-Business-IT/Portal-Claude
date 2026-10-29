@@ -6,7 +6,7 @@ const MAX_MB = 10;
 const MAX_FILES = 5;
 const fmtSize = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB");
 
-export default function Portal({ onAuthLost, onRan }) {
+export default function Portal({ onAuthLost, onRan, guest = false, onLoggedIn }) {
   const [tasks, setTasks] = useState(null);
   const [current, setCurrent] = useState(null);
   // Los datos de cada tarea se conservan al cambiar de una a otra y ante errores.
@@ -16,6 +16,21 @@ export default function Portal({ onAuthLost, onRan }) {
   const [openInfo, setOpenInfo] = useState({}); // skills cuya descripción está desplegada
   const [fileReset, setFileReset] = useState(0); // fuerza a vaciar el selector de archivos al pulsar "Quitar"
   const abortRef = useRef(null);
+  // Acceso abierto: para ejecutar se pide un token; al verificarlo se ejecuta lo que el usuario ya había escrito.
+  const [needToken, setNeedToken] = useState(false);
+  const [tokenIn, setTokenIn] = useState("");
+  const [tokenErr, setTokenErr] = useState("");
+  const [tokenBusy, setTokenBusy] = useState(false);
+  const [pendingRun, setPendingRun] = useState(false);
+  const runRef = useRef(null); // siempre apunta a la versión más reciente de run()
+
+  // Con el token ya verificado, se ejecuta de inmediato la tarea que estaba pendiente.
+  useEffect(() => {
+    if (pendingRun && !guest) {
+      setPendingRun(false);
+      runRef.current?.({ preventDefault() {} });
+    }
+  }, [pendingRun, guest]);
 
   useEffect(() => {
     api("GET", "/api/skills")
@@ -60,6 +75,10 @@ export default function Portal({ onAuthLost, onRan }) {
     e.preventDefault();
     const problem = validate();
     if (problem) return setRes({ status: "error", error: problem, text: "" });
+    if (guest) {
+      setNeedToken(true);
+      return;
+    }
 
     const form = new FormData();
     if (isSkill) {
@@ -104,6 +123,26 @@ export default function Portal({ onAuthLost, onRan }) {
       }
     } finally {
       onRan();
+    }
+  };
+
+  runRef.current = run;
+
+  const verifyToken = async (e) => {
+    e.preventDefault();
+    if (!tokenIn.trim()) return setTokenErr("Pega tu token para continuar.");
+    setTokenBusy(true);
+    setTokenErr("");
+    try {
+      const d = await api("POST", "/api/login", { token: tokenIn.trim() });
+      setTokenIn(""); // el token no se queda en memoria de la página
+      setNeedToken(false);
+      setPendingRun(true);
+      onLoggedIn?.(d);
+    } catch (err) {
+      setTokenErr(err.message);
+    } finally {
+      setTokenBusy(false);
     }
   };
 
@@ -196,6 +235,28 @@ export default function Portal({ onAuthLost, onRan }) {
               )}
             </div>
           ))}
+          {needToken && guest && (
+            <div className="alert warn tokenbox" role="group" aria-label="Token de acceso">
+              <label htmlFor="run-token"><strong>Para ejecutar necesitas un token de acceso.</strong> Pégalo aquí; lo que escribiste se conserva.</label>
+              <div className="row">
+                <input
+                  id="run-token"
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="gbl_…"
+                  value={tokenIn}
+                  onChange={(e) => setTokenIn(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && verifyToken(e)}
+                  autoFocus
+                />
+                <button type="button" className="primary" onClick={verifyToken} disabled={tokenBusy}>
+                  {tokenBusy ? "Verificando…" : "Verificar y ejecutar"}
+                </button>
+              </div>
+              {tokenErr && <div className="alert err" role="alert">{tokenErr}</div>}
+            </div>
+          )}
           <div className="row">
             <button className="primary" disabled={running}>{running ? "Ejecutando…" : "Ejecutar tarea"}</button>
             {running && (

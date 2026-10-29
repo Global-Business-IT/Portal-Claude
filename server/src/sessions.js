@@ -72,6 +72,12 @@ export async function requireSession(req, res, next) {
   next();
 }
 
+/** El invitado (acceso abierto) puede ver las skills, pero ejecutarlas exige un token personal. */
+export const requireToken = (req, res, next) =>
+  req.user?.guest
+    ? res.status(401).json({ error: "token_required", message: "Para ejecutar una skill necesitas un token de acceso. Solicítalo al administrador." })
+    : next();
+
 export const requireAdmin = (req, res, next) =>
   req.user?.role === "admin" ? next() : res.status(403).json({ error: "forbidden" });
 

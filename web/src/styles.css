@@ -124,3 +124,7 @@ td.desc { white-space: normal; min-width: 220px; max-width: 420px; }
 .msbtn:hover { background: #f3f3f3; }
 .msbtn:focus-visible { outline: 2px solid #0067b8; outline-offset: 2px; }
 .linkbtn { background: none; border: 0; color: var(--muted, #667); text-decoration: underline; cursor: pointer; font-size: 13px; padding: 4px; }
+
+.tokenbox { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.tokenbox .row { display: flex; gap: 8px; }
+.tokenbox input { flex: 1; }
