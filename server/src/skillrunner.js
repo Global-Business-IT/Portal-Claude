@@ -528,7 +528,7 @@ export async function runSkill({ name, text, files = [], allowScripts = false, s
     if (e instanceof SkillRunError) throw e;
     if (timedOut) throw new SkillRunError("timeout", "La skill tardó demasiado y se detuvo. Prueba con una solicitud o archivos más pequeños.");
     if (signal?.aborted) throw e; // el usuario cerró o detuvo: lo maneja quien llama
-    console.error("[skill] error:", String(e?.message || e).slice(0, 300));
+    console.error("[skill] error:", String(e?.message || e).slice(0, 1500));
     if (/sandbox/i.test(String(e?.message))) {
       throw new SkillRunError("sandbox", "Esta skill necesita ejecutar scripts, pero el entorno seguro no está disponible en el servidor. Avisa al administrador.");
     }
