@@ -1,0 +1,8 @@
+{
+  "functions": {
+    "api/spike.js": {
+      "maxDuration": 120,
+      "includeFiles": "node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/**"
+    }
+  }
+}

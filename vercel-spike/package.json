@@ -1,0 +1,9 @@
+{
+  "name": "portal-claude-vercel-spike",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "22.x" },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.293"
+  }
+}
