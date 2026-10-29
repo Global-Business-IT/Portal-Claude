@@ -19,7 +19,7 @@ export async function destroySession(sid) {
 // Acceso abierto (OPEN_ACCESS=1): quien entra sin token usa el usuario compartido "Invitado", con límite diario propio.
 // Es temporal y solo para pruebas internas: cualquiera con la dirección puede gastar de la clave de Anthropic.
 const GUEST_NAME = "Invitado (acceso abierto)";
-const openAccess = () => process.env.OPEN_ACCESS === "1";
+export const openAccess = () => /^(1|true|si|sí|yes)$/i.test(String(process.env.OPEN_ACCESS ?? "").trim());
 async function guestUser() {
   const limit = Number(process.env.OPEN_ACCESS_DAILY_LIMIT) || 100;
   let t = await get("SELECT id, role, daily_limit, revoked_at FROM tokens WHERE name = ? AND token_hint = 'abierto'", [GUEST_NAME]);

@@ -14,6 +14,10 @@ export const nowStr = (d = new Date()) => d.toISOString().slice(0, 19).replace("
 /** Convierte lo que devuelva cualquiera de los motores (Date o texto sin zona = UTC) en Date. */
 export const toDate = (v) => (v instanceof Date ? v : new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(String(v)) ? v : String(v).replace(" ", "T") + "Z"));
 
+if (!usePg && process.env.VERCEL) {
+  throw new Error("Falta la variable DATABASE_URL en Vercel (Settings → Environment Variables). Sin ella no hay base de datos.");
+}
+
 let sqlite = null; // manejador de better-sqlite3 (solo con SQLite); las pruebas lo usan directamente
 let pool = null;
 

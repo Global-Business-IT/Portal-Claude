@@ -15,7 +15,7 @@ import { fileToBlock, MAX_FILE_BYTES, UserInputError } from "./files.js";
 import { runStream, friendlyError, MODEL } from "./claude.js";
 import { syncSkills, syncStatus, cfg as gitCfg, NAME_RE } from "./gitsync.js";
 import { downloadTarget, readOutput, serverless } from "./storage.js";
-import { purgeSessions } from "./sessions.js";
+import { purgeSessions, openAccess } from "./sessions.js";
 import { mdToDocx, mdToPdf } from "./convert.js";
 import { runSkill, restrictedAllowed, SkillRunError, safeName, purgeOutputs, MAX_INPUT_FILES, MAX_INPUT_FILE_BYTES } from "./skillrunner.js";
 
@@ -513,7 +513,7 @@ export function createApp() {
     res.json({ ok: true, ...out });
   });
 
-  app.get("/api/health", (_req, res) => res.json({ ok: true, model: MODEL }));
+  app.get("/api/health", (_req, res) => res.json({ ok: true, model: MODEL, openAccess: openAccess() }));
   app.use("/api", (_req, res) => res.status(404).json({ error: "not_found" }));
 
   // ---------- Frontend compilado ----------
