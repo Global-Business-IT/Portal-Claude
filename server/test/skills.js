@@ -610,3 +610,164 @@ test("26. acceso abierto: el invitado ve las skills pero ejecutar exige token", 
     restoreEnv();
   }
 });
+
+// ---------- Claude Managed Agents (cliente simulado) ----------
+
+const mg = await import("../src/managed.js");
+
+function fakeAnthropic(script = {}) {
+  const calls = { skillCreate: 0, versionCreate: 0, agentCreate: 0, envCreate: 0, upload: [], sessions: [], sent: [], deleted: [], fileDeleted: [], envCfg: null, agentArgs: null, resources: null };
+  let cur = null; // cada llamada a stream() abre una cola nueva, como el servicio real
+  const push = (e) => { cur.queue.push(e); cur.wake?.(); };
+  const makeStream = () => {
+    const st = { queue: [], wake: null };
+    const controller = { abort() { st.queue.push({ __end: true }); st.wake?.(); } };
+    st.iter = {
+      controller,
+      async *[Symbol.asyncIterator]() {
+        for (;;) {
+          if (!st.queue.length) await new Promise((r) => (st.wake = r));
+          const e = st.queue.shift();
+          if (!e) continue;
+          if (e.__end) return;
+          yield e;
+        }
+      },
+    };
+    return st;
+  };
+  const c = {
+    beta: {
+      skills: {
+        async create() { calls.skillCreate++; return { id: "skill_1" }; },
+        versions: { async create() { calls.versionCreate++; return { id: "skver_1" }; } },
+      },
+      environments: { async create(a) { calls.envCreate++; calls.envCfg = a; return { id: "env_1" }; } },
+      agents: { async create(a) { calls.agentCreate++; calls.agentArgs = a; return { id: "agent_1" }; } },
+      files: {
+        async upload({ file }) { calls.upload.push(file.name); return { id: `file_in_${calls.upload.length}` }; },
+        async list() { return { data: script.files ?? [{ id: "file_out_1", filename: "informe final.docx" }] }; },
+        async download() { return new Response(Buffer.from("DOCX-FALSO")); },
+        async delete(id) { calls.fileDeleted.push(id); },
+      },
+      sessions: {
+        async create(a) { calls.sessions.push(a); calls.resources = a.resources; return { id: "sesn_1" }; },
+        async retrieve() { return { usage: { list_cost: { amount: "37", currency: "USD" } } }; },
+        async delete(id) { calls.deleted.push(id); },
+        events: {
+          async stream() { cur = makeStream(); return cur.iter; },
+          async send(_id, { events }) {
+            calls.sent.push(events);
+            if (events[0].type === "user.interrupt") return;
+            if (events[0].type !== "user.message") return;
+            if (script.hang) return; // nunca termina
+            setTimeout(() => {
+              if (script.error) push({ type: "session.error", error: { message: "boom" } });
+              push({ type: "agent.tool_use", name: "bash" });
+              push({ type: "agent.message", content: [{ type: "text", text: script.text ?? "Listo, generé el documento." }] });
+              push({ type: "session.status_idle", stop_reason: { type: script.stop ?? "end_turn" } });
+            }, 5);
+          },
+        },
+      },
+    },
+  };
+  return { c, calls };
+}
+
+test("27. Managed Agents: sube la skill una vez, ejecuta, guarda los archivos, devuelve costo y limpia", async () => {
+  const { c, calls } = fakeAnthropic();
+  mg.setManagedClient(c);
+  setEnv({ SKILL_RUNNER: "managed", MANAGED_FILES_WAIT_MS: "1" });
+  try {
+    const statuses = [];
+    let streamed = "";
+    const r = await runner.runSkill({
+      name: "resumen-reunion", text: "Resume esto", tokenId: ana.id,
+      files: [{ originalname: "acta final.pdf", buffer: Buffer.from("%PDF-x"), size: 6 }],
+      onText: (t) => (streamed += t), onStatus: (s) => statuses.push(s),
+    });
+    assert.equal(streamed, "Listo, generé el documento.");
+    assert.equal(r.costUsd, 0.37);
+    assert.deepEqual(r.outputs.map((o) => o.name), ["informe final.docx"]);
+    assert.ok(fs.existsSync(path.join(process.env.OUTPUTS_DIR, r.runId, "informe final.docx")));
+    assert.ok(await dbm.get("SELECT 1 AS x FROM run_files WHERE run_id = ?", [r.runId]));
+    assert.ok(statuses.includes("Ejecutando la skill…"));
+    // adjunto subido con su ruta montada y mensaje con la skill y el texto
+    assert.deepEqual(calls.upload, ["acta final.pdf"]);
+    assert.equal(calls.resources[0].mount_path, "/acta final.pdf");
+    const msg = calls.sent[0][0].content[0].text;
+    assert.ok(msg.includes('skill "resumen-reunion"') && msg.includes("Resume esto") && msg.includes("/mnt/session/outputs/"));
+    // entorno: red limitada, paquetes de pip y herramientas web apagadas en el agente
+    assert.equal(calls.envCfg.config.networking.type, "limited");
+    assert.ok(calls.envCfg.config.packages.pip.includes("python-docx"));
+    assert.ok(calls.agentArgs.tools[0].configs.every((x) => x.enabled === false));
+    // privacidad: se borran la sesión y los adjuntos
+    assert.deepEqual(calls.deleted, ["sesn_1"]);
+    assert.deepEqual(calls.fileDeleted, ["file_in_1"]);
+
+    // segunda ejecución: no vuelve a crear skill, agente ni entorno
+    await runner.runSkill({ name: "resumen-reunion", text: "otra", tokenId: ana.id });
+    assert.equal(calls.skillCreate, 1); assert.equal(calls.agentCreate, 1); assert.equal(calls.envCreate, 1); assert.equal(calls.versionCreate, 0);
+
+    // si cambia el contenido de la skill en Git, se sube una versión nueva (el agente la toma solo)
+    put("resumen-reunion/SKILL.md", skillMd("resumen-reunion", "Resume reuniones", "") + "\nNuevo paso.\n");
+    commit("cambia skill");
+    assert.equal((await git_.syncSkills("prueba")).ok, true);
+    await runner.runSkill({ name: "resumen-reunion", text: "otra", tokenId: ana.id });
+    assert.equal(calls.versionCreate, 1); assert.equal(calls.skillCreate, 1); assert.equal(calls.agentCreate, 1);
+  } finally {
+    restoreEnv(); mg.setManagedClient(null);
+  }
+});
+
+test("28. Managed Agents: errores, tiempo máximo y cancelación se traducen a mensajes claros", async () => {
+  setEnv({ SKILL_RUNNER: "managed", MANAGED_FILES_WAIT_MS: "1" });
+  try {
+    // sesión sin archivos y con error de sesión → no es un resultado
+    let f = fakeAnthropic({ files: [] });
+    mg.setManagedClient(f.c);
+    const ok = await runner.runSkill({ name: "resumen-reunion", text: "x", tokenId: ana.id });
+    assert.deepEqual(ok.outputs, []);
+
+    // presupuesto agotado
+    f = fakeAnthropic({ stop: "budget_reached" });
+    mg.setManagedClient(f.c);
+    await assert.rejects(() => runner.runSkill({ name: "resumen-reunion", text: "x", tokenId: ana.id }), (e) => e.code === "budget");
+
+    // la API rechaza la clave: mensaje de configuración, sin detalles internos
+    await dbm.run("DELETE FROM kv WHERE key = 'managed'"); // sin estado guardado, para que intente crear el entorno
+    f = fakeAnthropic();
+    f.c.beta.environments.create = async () => { throw Object.assign(new Error("invalid x-api-key sk-ant-SECRETO"), { status: 401 }); };
+    mg.setManagedClient(f.c);
+    setEnv({ SKILL_RUNNER: "managed" });
+    await assert.rejects(() => runner.runSkill({ name: "resumen-reunion", text: "x", tokenId: ana.id }), (e) => e.code === "config" && !/SECRETO/.test(e.userMessage));
+
+    // tiempo máximo
+    f = fakeAnthropic({ hang: true });
+    mg.setManagedClient(f.c);
+    setEnv({ SKILL_TIMEOUT_SEC: "0.2" });
+    await assert.rejects(() => runner.runSkill({ name: "resumen-reunion", text: "x", tokenId: ana.id }), (e) => e.code === "timeout");
+    assert.ok(f.calls.sent.some((ev) => ev[0].type === "user.interrupt"), "interrumpe la sesión");
+    assert.deepEqual(f.calls.deleted, ["sesn_1"]);
+
+    // cancelación del usuario
+    f = fakeAnthropic({ hang: true });
+    mg.setManagedClient(f.c);
+    setEnv({ SKILL_TIMEOUT_SEC: undefined });
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50);
+    await assert.rejects(() => runner.runSkill({ name: "resumen-reunion", text: "x", tokenId: ana.id, signal: ac.signal }), (e) => e.name === "AbortError");
+    assert.deepEqual(f.calls.deleted, ["sesn_1"]);
+  } finally {
+    restoreEnv(); mg.setManagedClient(null);
+  }
+});
+
+test("29. /api/health indica qué ejecutor se usa; en local se mantiene el actual", async () => {
+  assert.equal((await (await call("GET", "/api/health", {})).json()).runner, "local");
+  setEnv({ SKILL_RUNNER: "managed" });
+  try { assert.equal((await (await call("GET", "/api/health", {})).json()).runner, "managed"); } finally { restoreEnv(); }
+  setEnv({ VERCEL: "1" });
+  try { assert.equal(mg.managedEnabled(), true); setEnv({ SKILL_RUNNER: "local" }); assert.equal(mg.managedEnabled(), false); } finally { restoreEnv(); }
+});

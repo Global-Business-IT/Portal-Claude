@@ -57,3 +57,7 @@ Vercel no puede ejecutar el backend tal cual (funciones de corta duración, sin 
 - `gbit-doc-iso9001` end-to-end: documento con logo/razón social reales (requiere indicar empresa, tipo, área, proyecto y "elaborado por" en la consulta).
 - Docker build y sandbox dentro del contenedor (imagen preparada; falta construirla y correr `npm run check-deploy` en la plataforma elegida).
 - Validar y activar el resto de skills del repo.
+
+## Modo Managed Agents (Vercel)
+
+`server/src/managed.js`: en Vercel (o con `SKILL_RUNNER=managed`) las skills se ejecutan en Claude Managed Agents (API beta, misma `ANTHROPIC_API_KEY`). El portal sigue siendo el front: tokens, límites, BD y UI no cambian. Se sube la skill una vez (nueva versión si cambia su contenido), se crea un entorno con red limitada y pip, y cada ejecución es una sesión que se borra al terminar. Los archivos de `/mnt/session/outputs/` se guardan con `saveOutput`. El ajuste `allow_scripts` se ignora en este modo (los scripts corren en el sandbox de Anthropic). `/api/health` muestra `runner`. Estado (ids) en kv clave `managed`. Costo: confirmar en la consola de Anthropic.

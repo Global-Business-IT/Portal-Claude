@@ -7,6 +7,7 @@ import path from "node:path";
 import { all, run as dbRun } from "./db.js";
 import { skillsRoot, ensureSkills } from "./gitsync.js";
 import { outputsRoot, saveOutput, removeRun } from "./storage.js";
+import { managedEnabled, runManaged } from "./managed.js";
 
 export const MAX_INPUT_FILES = 5;
 export const MAX_INPUT_FILE_BYTES = (process.env.VERCEL ? 4 : 10) * 1024 * 1024;
@@ -383,6 +384,8 @@ function buildEnv(runDir) {
  * Devuelve { runId, outputs, costUsd, chars }. Lanza SkillRunError con mensajes para el usuario.
  */
 export async function runSkill({ name, text, files = [], allowScripts = false, scriptsMode, tokenId, onText, onStatus, signal }) {
+  // Claude Managed Agents: el agente y los scripts corren en la nube de Anthropic (aislados allí), no en este servidor.
+  if (managedEnabled()) return runManaged({ name, text, files, tokenId, onText, onStatus, signal });
   // scriptsMode manda; allowScripts (booleano) se mantiene por compatibilidad: true = aislados.
   let mode = scriptsMode ?? (allowScripts ? SCRIPT_MODES.SANDBOX : SCRIPT_MODES.OFF);
   if (mode === SCRIPT_MODES.RESTRICTED && !restrictedAllowed()) mode = SCRIPT_MODES.OFF;
