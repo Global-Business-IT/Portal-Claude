@@ -545,12 +545,12 @@ test("23. Supabase Storage: guarda, firma la descarga y borra; la descarga redir
       if (init.method === "DELETE") return Response.json([]);
       return new Response("x");
     }, async () => {
-      await st.saveOutput("r1", "a b.docx", f);
-      const t = await st.downloadTarget("r1", "a b.docx");
-      assert.equal(t.url, "https://sb.test/storage/v1/object/sign/portal-files/outputs/r1/a%20b.docx?token=T&download=a%20b.docx");
-      await st.removeRun("r1", ["a b.docx"]);
+      await st.saveOutput("r1", "Evaluación a b.docx", f);
+      const t = await st.downloadTarget("r1", "Evaluación a b.docx");
+      assert.equal(t.url, "https://sb.test/storage/v1/object/sign/portal-files/outputs/r1/a%20b.docx?token=T&download=Evaluaci%C3%B3n%20a%20b.docx");
+      await st.removeRun("r1", ["Evaluación a b.docx"]);
     });
-    assert.equal(log[0][1], "https://sb.test/storage/v1/object/portal-files/outputs/r1/a%20b.docx");
+    assert.match(log[0][1], /^https:\/\/sb\.test\/storage\/v1\/object\/portal-files\/outputs\/r1\/[0-9a-f]{8}_Evaluacion_a_b\.docx$/); // clave ASCII
     assert.deepEqual(log.map((l) => l[0]), ["POST", "POST", "DELETE"]);
     // sin credenciales: error claro
     setEnv({ SUPABASE_SERVICE_ROLE_KEY: "" });

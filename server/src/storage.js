@@ -4,6 +4,7 @@
 // Por defecto: supabase si corre en Vercel o STORAGE=supabase; local en cualquier otro caso.
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 
 export const serverless = Boolean(process.env.VERCEL);
 export const storageKind = () => {
@@ -22,7 +23,13 @@ function sb() {
   return { base: `${base}/storage/v1`, headers: { Authorization: `Bearer ${key}`, apikey: key } };
 }
 
-const objPath = (runId, name) => `outputs/${runId}/${name}`;
+// Supabase Storage rechaza claves con tildes, ñ o símbolos; la clave es ASCII y el nombre real se conserva en run_files.
+const objKey = (name) => {
+  const clean = String(name).normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9._-]+/g, "_").slice(-120);
+  if (clean === name) return clean;
+  return crypto.createHash("sha1").update(String(name)).digest("hex").slice(0, 8) + "_" + clean;
+};
+const objPath = (runId, name) => `outputs/${runId}/${objKey(name)}`;
 const enc = (p) => p.split("/").map(encodeURIComponent).join("/");
 
 async function sbFetch(url, init, okStatuses = [200]) {
